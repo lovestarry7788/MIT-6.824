@@ -296,6 +296,7 @@ func (rf *Raft) killed() bool {
 }
 
 func (rf *Raft) StartElection() {
+	DPrintf("%v Start Election!\n", rf.me)
 	rf.toCandidate()
 	rf.currentTerm = rf.currentTerm + 1 // 新一轮选举开始，任期+1
 	voteNumber := 1
@@ -334,6 +335,7 @@ func (rf *Raft) StartElection() {
 // 心跳检测
 func (rf *Raft) BroadcastHeartBeat() {
 	if rf.state == Leader {
+		DPrintf("%v broadcast HeartBeat!", rf.me)
 		for i := range rf.peers {
 			if i != rf.me {
 				go rf.HandleAppendEntries(i)
@@ -348,7 +350,7 @@ func (rf *Raft) ElectTimerReset() { // 150 ms - 300 ms 之间
 }
 
 func (rf *Raft) HeartBeatTimerReset() { // 要比选举超时的时间要短
-	rf.HeartBeatTimer.Reset(time.Duration(100) * time.Millisecond)
+	rf.HeartBeatTimer.Reset(time.Duration(50) * time.Millisecond)
 }
 
 // The ticker go routine starts a new election if this peer hasn't received
@@ -375,13 +377,6 @@ func (rf *Raft) ticker() {
 	}
 }
 
-func Max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
-}
-
 func (rf *Raft) ApplyToStateMachine() {
 	for !rf.killed() {
 		rf.mu.Lock()
@@ -393,6 +388,7 @@ func (rf *Raft) ApplyToStateMachine() {
 			rf.applyCond.Wait()
 			rf.mu.Unlock()
 		} else {
+			DPrintf("%v commitIndex: %v, lastApplied: %v\n", rf.me, commitIndex, lastApplied)
 			for i := lastApplied + 1; i <= commitIndex; i++ {
 				rf.mu.Lock()
 				applyMsg := ApplyMsg{
@@ -425,23 +421,22 @@ func (rf *Raft) ApplyToStateMachine() {
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
 	rf := &Raft{
-		peers:       peers,
-		persister:   persister,
-		me:          me,
-		currentTerm: 0,
-		votedFor:    -1,
-		log:         make([]LogEntry, 1),
-		commitIndex: 0,
-		lastApplied: 0,
-		nextIndex:   make([]int, len(peers)),
-		matchIndex:  make([]int, len(peers)),
-		state:       Follower,
-
+		peers:          peers,
+		persister:      persister,
+		me:             me,
+		currentTerm:    0,
+		votedFor:       -1,
+		log:            make([]LogEntry, 1),
+		commitIndex:    0,
+		lastApplied:    0,
+		nextIndex:      make([]int, len(peers)),
+		matchIndex:     make([]int, len(peers)),
+		state:          Follower,
 		ElectTimer:     time.NewTimer(time.Duration(150) * time.Millisecond),
 		HeartBeatTimer: time.NewTimer(time.Duration(150+rand.Float64()*150) * time.Millisecond),
 		applyCh:        applyCh,
 	}
-
+	rf.applyCond = sync.NewCond(&rf.mu)
 	// Your initialization code here (2A, 2B, 2C).
 
 	// initialize from state persisted before a crash

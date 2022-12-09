@@ -9,18 +9,18 @@ type LogEntry struct {
 type AppendEntriesArgs struct {
 	Term         int        // Leader 任期号
 	Leader       int        // Leader id 为了能帮助客户端重定向到 Leader 服务器
-	PrevLogIndex int        // 前一条日志的索引值
-	PrevLogTerm  int        // 前一条日志的任期值
+	PrevLogIndex int        // 表示当前要复制的日志项，前一条日志项的索引值。
+	PrevLogTerm  int        // 表示当前要复制的日志项，前一条日志项的任期编号。
 	Entries      []LogEntry // 需要同步的日志条目
 	LeaderCommit int        // leader 已提交的日志号
 }
 
 type AppendEntriesReply struct {
-	PrevLogIndex int // 日志冲突时，冲突日志的 Index
-	PreLogTerm   int // 日志冲突时，冲突日志的 Term
-	Len          int
-	Term         int
-	Success      bool
+	// PrevLogIndex int // 日志冲突时，冲突日志的 Index
+	// PreLogTerm   int // 日志冲突时，冲突日志的 Term
+	// Len          int
+	Term    int
+	Success bool
 }
 
 func (rf *Raft) LastLog() LogEntry {
@@ -39,39 +39,40 @@ func (rf *Raft) HandleAppendEntries(server int) {
 		Leader:       rf.me,
 		PrevLogIndex: rf.nextIndex[server] - 1,
 		PrevLogTerm:  rf.log[rf.nextIndex[server]-1].Term,
+		Entries:      rf.log[rf.nextIndex[server]:],
 		LeaderCommit: rf.commitIndex,
 	}
 	reply := &AppendEntriesReply{}
-
-	// args.Entries = make([]LogEntry, )
-	// copy()
-
 	rf.mu.Unlock()
-	// 并发发送请求
-	ok := rf.sendAppendEntries(server, args, reply)
 
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	if rf.state != Leader || rf.currentTerm != args.Term { // 过期请求
-		return
-	}
-
-	// 发现新的 term, leader 变成 follower
-	if reply.Term > rf.currentTerm {
-		rf.currentTerm = reply.Term
-		rf.toFollower()
-		rf.votedFor = -1
-		return
-	}
-
-	if reply.Success {
-		rf.matchIndex[server] = args.PrevLogIndex + len(args.Entries)
-		rf.nextIndex[server] = rf.matchIndex[server] + 1
-	} else { // 日志不一致，更新 nextIndex
-		if reply.Term == -1 {
+	// 要复制的要在 log 的范围内
+	if len(rf.log)-1 >= rf.nextIndex[server] {
+		// request
+		if ok := rf.sendAppendEntries(server, args, reply); !ok {
+			return
 		}
-	}
+		DPrintf("log replicated %v from %v to %v, status: %v\n", args.Entries, rf.me, server, reply.Success)
 
+		rf.mu.Lock()
+		if rf.state != Leader || rf.currentTerm != args.Term { // 过期请求
+			return
+		}
+		// 发现新的 term, leader 变成 follower
+		if reply.Term > rf.currentTerm {
+			rf.currentTerm = reply.Term
+			rf.toFollower()
+			rf.votedFor = -1
+			return
+		}
+
+		if reply.Success {
+			rf.matchIndex[server] = args.PrevLogIndex + len(args.Entries)
+			rf.nextIndex[server] = rf.matchIndex[server] + 1
+		} else { // 日志不一致，更新 nextIndex
+			rf.nextIndex[server] = Max(1, rf.nextIndex[server]-1)
+		}
+		rf.mu.Unlock()
+	}
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
@@ -81,26 +82,54 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Term = rf.currentTerm
 	}()
 
+	DPrintf("[AppendEntries] [args.PrevLogTerm: %v, args.PrevLogIndex: %v, args.Term: %v, rf.currentTerm: %v]\n", args.PrevLogTerm, args.PrevLogIndex, args.Term, rf.currentTerm)
 	// term < currentTerm, reject.
 	if args.Term < rf.currentTerm {
 		reply.Success = false
 		return
-	} else { // Turn to follower if find a leader.
+	} else if args.Term > rf.currentTerm { // Turn to follower if find a leader.
+		rf.votedFor = -1
 		rf.currentTerm = args.Term
-		rf.toFollower()
 	}
 
+	rf.toFollower()
 	rf.ElectTimerReset()
 
-	// Reject if log doesn't contain a matching previous entry
-	if ok := rf.FindEntry(args.PrevLogIndex, args.PrevLogTerm); !ok {
+	// 日志不一致，返回不成功 AppendEntries RPC implementation 2.
+	if args.PrevLogIndex >= len(rf.log) || rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
 		reply.Success = false
-
 		return
 	}
 
-}
+	// AppendEntries RPC implementation 3. 4.
+	i := 0
+	j := args.PrevLogIndex + 1
+	for i = 0; i < len(args.Entries); i++ {
+		if j >= len(rf.log) {
+			break
+		} else if rf.log[j].Term == args.Entries[i].Term { // term 和 index 都相同
+			j++
+		} else {
+			rf.log = append(rf.log[:j], args.Entries[i:]...)
+			i = len(args.Entries)
+			j = len(rf.log) - 1
+			break
+		}
+	}
 
-func (rf *Raft) FindEntry(index, term int) bool {
+	DPrintf("[log replicated success] [i: %v, j: %v] \n", i, j)
 
+	if i < len(args.Entries) {
+		rf.log = append(rf.log, args.Entries[i:]...)
+		j = len(rf.log) - 1
+	} else {
+		j-- // commitIndex
+	}
+
+	// AppendEntries RPC implementation 5.
+	if args.LeaderCommit > rf.commitIndex {
+		rf.commitIndex = Min(args.LeaderCommit, j)
+	}
+
+	reply.Success = true
 }
