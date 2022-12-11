@@ -269,6 +269,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 			Term:    term,
 		}
 		rf.log = append(rf.log, logEntry)
+		DPrintf("%v start append log %v success!\n", rf.me, logEntry)
 		rf.mu.Unlock()
 	}
 	return index, term, isLeader
@@ -287,6 +288,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 //
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
+	DPrintf("%v is Killed", rf.me)
 	// Your code here, if desired.
 }
 
@@ -346,11 +348,15 @@ func (rf *Raft) BroadcastHeartBeat() {
 
 // ResetTimer
 func (rf *Raft) ElectTimerReset() { // 150 ms - 300 ms 之间
-	rf.ElectTimer.Reset(time.Duration(150+rand.Float64()*150) * time.Millisecond)
+	time := time.Duration(150+rand.Float64()*150) * time.Millisecond
+	DPrintf("%v ElectTimer reset to %v\n", rf.me, time)
+	rf.ElectTimer.Reset(time)
 }
 
 func (rf *Raft) HeartBeatTimerReset() { // 要比选举超时的时间要短
-	rf.HeartBeatTimer.Reset(time.Duration(50) * time.Millisecond)
+	time := time.Duration(50) * time.Millisecond
+	DPrintf("%v HeartBeatTimer reset to %v\n", rf.me, time)
+	rf.HeartBeatTimer.Reset(time)
 }
 
 // The ticker go routine starts a new election if this peer hasn't received
@@ -362,11 +368,19 @@ func (rf *Raft) ticker() {
 		// time.Sleep().
 		select {
 		case <-rf.ElectTimer.C: // 选举超时
+			if rf.killed() {
+				break
+			}
 			rf.mu.Lock()
-			rf.StartElection()
-			rf.ElectTimerReset()
+			if rf.state != Leader {
+				rf.StartElection()
+				rf.ElectTimerReset()
+			}
 			rf.mu.Unlock()
 		case <-rf.HeartBeatTimer.C: // 心跳检测
+			if rf.killed() {
+				break
+			}
 			rf.mu.Lock()
 			if rf.state == Leader {
 				rf.BroadcastHeartBeat()
@@ -388,7 +402,6 @@ func (rf *Raft) ApplyToStateMachine() {
 			rf.applyCond.Wait()
 			rf.mu.Unlock()
 		} else {
-			DPrintf("%v commitIndex: %v, lastApplied: %v\n", rf.me, commitIndex, lastApplied)
 			for i := lastApplied + 1; i <= commitIndex; i++ {
 				rf.mu.Lock()
 				applyMsg := ApplyMsg{
@@ -402,6 +415,7 @@ func (rf *Raft) ApplyToStateMachine() {
 			}
 			rf.mu.Lock()
 			rf.lastApplied = Max(rf.lastApplied, commitIndex)
+			DPrintf("[%v Applied Log %v Success]\n", rf.me, lastApplied)
 			rf.mu.Unlock()
 		}
 	}

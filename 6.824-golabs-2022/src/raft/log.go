@@ -44,35 +44,34 @@ func (rf *Raft) HandleAppendEntries(server int) {
 	}
 	reply := &AppendEntriesReply{}
 	rf.mu.Unlock()
-
 	// 要复制的要在 log 的范围内
-	if len(rf.log)-1 >= rf.nextIndex[server] {
-		// request
-		if ok := rf.sendAppendEntries(server, args, reply); !ok {
-			return
-		}
-		DPrintf("log replicated %v from %v to %v, status: %v\n", args.Entries, rf.me, server, reply.Success)
-
-		rf.mu.Lock()
-		if rf.state != Leader || rf.currentTerm != args.Term { // 过期请求
-			return
-		}
-		// 发现新的 term, leader 变成 follower
-		if reply.Term > rf.currentTerm {
-			rf.currentTerm = reply.Term
-			rf.toFollower()
-			rf.votedFor = -1
-			return
-		}
-
-		if reply.Success {
-			rf.matchIndex[server] = args.PrevLogIndex + len(args.Entries)
-			rf.nextIndex[server] = rf.matchIndex[server] + 1
-		} else { // 日志不一致，更新 nextIndex
-			rf.nextIndex[server] = Max(1, rf.nextIndex[server]-1)
-		}
-		rf.mu.Unlock()
+	// if len(rf.log)-1 >= rf.nextIndex[server] {
+	// request
+	if ok := rf.sendAppendEntries(server, args, reply); !ok {
+		return
 	}
+	DPrintf("log replicated %v from %v to %v, status: %v\n", args.Entries, rf.me, server, reply.Success)
+
+	rf.mu.Lock()
+	if rf.state != Leader || rf.currentTerm != args.Term { // 过期请求
+		return
+	}
+	// 发现新的 term, leader 变成 follower
+	if reply.Term > rf.currentTerm {
+		rf.currentTerm = reply.Term
+		rf.toFollower()
+		rf.votedFor = -1
+		return
+	}
+
+	if reply.Success {
+		rf.matchIndex[server] = args.PrevLogIndex + len(args.Entries)
+		rf.nextIndex[server] = rf.matchIndex[server] + 1
+	} else { // 日志不一致，更新 nextIndex
+		rf.nextIndex[server] = Max(1, rf.nextIndex[server]-1)
+	}
+	rf.mu.Unlock()
+	// }
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
@@ -92,8 +91,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.currentTerm = args.Term
 	}
 
-	rf.toFollower()
 	rf.ElectTimerReset()
+	rf.toFollower()
 
 	// 日志不一致，返回不成功 AppendEntries RPC implementation 2.
 	if args.PrevLogIndex >= len(rf.log) || rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
@@ -111,21 +110,22 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			j++
 		} else {
 			rf.log = append(rf.log[:j], args.Entries[i:]...)
+			DPrintf("[log replicated success] [Entries: %v, me: %v]\n", args.Entries[i:], rf.me)
 			i = len(args.Entries)
 			j = len(rf.log) - 1
 			break
 		}
 	}
 
-	DPrintf("[log replicated success] [i: %v, j: %v] \n", i, j)
-
 	if i < len(args.Entries) {
 		rf.log = append(rf.log, args.Entries[i:]...)
+		DPrintf("[log replicated success] [Entries: %v, me: %v]\n", args.Entries[i:], rf.me)
 		j = len(rf.log) - 1
 	} else {
 		j-- // commitIndex
 	}
 
+	DPrintf("me: %v, LeaderCommit: %v, commitIndex: %v, j: %v\n", rf.me, args.LeaderCommit, rf.commitIndex, j)
 	// AppendEntries RPC implementation 5.
 	if args.LeaderCommit > rf.commitIndex {
 		rf.commitIndex = Min(args.LeaderCommit, j)

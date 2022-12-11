@@ -18,7 +18,7 @@ func (rf *Raft) toFollower() {
 }
 
 func (rf *Raft) toCandidate() {
-	DPrintf("%v turn to Cnadidate!\n", rf.me)
+	DPrintf("%v turn to Candidate!\n", rf.me)
 	rf.state = Candidate
 	rf.votedFor = rf.me
 }
