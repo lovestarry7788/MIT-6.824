@@ -53,6 +53,7 @@ func (rf *Raft) HandleAppendEntries(server int) {
 	DPrintf("log replicated %v from %v to %v, status: %v\n", args.Entries, rf.me, server, reply.Success)
 
 	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	if rf.state != Leader || rf.currentTerm != args.Term { // 过期请求
 		return
 	}
@@ -70,7 +71,6 @@ func (rf *Raft) HandleAppendEntries(server int) {
 	} else { // 日志不一致，更新 nextIndex
 		rf.nextIndex[server] = Max(1, rf.nextIndex[server]-1)
 	}
-	rf.mu.Unlock()
 	// }
 }
 
@@ -128,7 +128,11 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	DPrintf("me: %v, LeaderCommit: %v, commitIndex: %v, j: %v\n", rf.me, args.LeaderCommit, rf.commitIndex, j)
 	// AppendEntries RPC implementation 5.
 	if args.LeaderCommit > rf.commitIndex {
+		commitIndex := rf.commitIndex
 		rf.commitIndex = Min(args.LeaderCommit, j)
+		if rf.commitIndex > commitIndex {
+			rf.applyCond.Broadcast()
+		}
 	}
 
 	reply.Success = true

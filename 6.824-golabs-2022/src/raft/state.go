@@ -54,14 +54,14 @@ func (rf *Raft) updateCommitIndex() {
 				}
 			}
 
-			if num > len(rf.peers)/2 {
+			// 算上自己，超过半数
+			if num >= len(rf.peers)/2 {
 				DPrintf("[UpdateCommitIndex] [me: %v, commitIndex: %v]", rf.me, i)
 				rf.commitIndex = i
 				rf.applyCond.Broadcast()
 				break
 			}
 		}
-
 		// rf.mu.Unlock()
 	}
 }
