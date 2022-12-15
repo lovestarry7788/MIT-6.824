@@ -38,6 +38,39 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 
 func (rf *Raft) HandleAppendEntries(server int) {
 	defer rf.persist()
+	// 要复制的Index日志已经在快照中 / 可理解为 server 落后太多，raft采用 快照+持久化 的方式来恢复
+	if rf.nextIndex[server] <= rf.lastIncludedIndex {
+		rf.mu.Lock()
+		args := &InstallSnapshotArgs{
+			Term:              rf.currentTerm,
+			LeaderId:          rf.me,
+			LastIncludedIndex: rf.lastIncludedIndex,
+			LastIncludedTerm:  rf.lastIncludedTerm,
+			data:              rf.snapshot,
+		}
+		reply := &InstallSnapshotReply{}
+		rf.mu.Unlock()
+		if ok := rf.sendInstallSnapshot(server, args, reply); !ok {
+			DPrintf("rf.sendInstallSnapshot error, from: %v, to: %v, args: %v, reply: %v\n", rf.me, server, args, reply)
+			return
+		}
+		rf.mu.Lock()
+		defer rf.mu.Unlock()
+		if rf.state != Leader || rf.currentTerm != args.Term { // 过期请求
+			return
+		}
+		// 发现新的 term, leader 变成 follower
+		if reply.Term > rf.currentTerm {
+			rf.currentTerm = reply.Term
+			rf.toFollower()
+			rf.votedFor = -1
+			return
+		}
+		rf.matchIndex[server] = rf.lastIncludedIndex
+		rf.nextIndex[server] = rf.matchIndex[server] + 1
+		return
+	}
+
 	rf.mu.Lock()
 	args := &AppendEntriesArgs{
 		Term:         rf.currentTerm,
@@ -53,6 +86,7 @@ func (rf *Raft) HandleAppendEntries(server int) {
 	// if len(rf.log)-1 >= rf.nextIndex[server] {
 	// request
 	if ok := rf.sendAppendEntries(server, args, reply); !ok {
+		DPrintf("rf.sendAppendEntries error, from: %v, to: %v, args: %v, reply: %v\n", rf.me, server, args, reply)
 		return
 	}
 	DPrintf("log replicated %v from %v to %v, status: %v\n", args.Entries, rf.me, server, reply.Success)

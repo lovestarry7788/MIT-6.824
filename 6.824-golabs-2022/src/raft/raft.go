@@ -90,40 +90,8 @@ type Raft struct {
 	applyCond *sync.Cond
 
 	// 上一次快照信息
-	lastIncludeIndex int
-	lastIncludeTerm  int
-}
-
-//
-// A service wants to switch to snapshot.  Only do so if Raft hasn't
-// have more recent info since it communicate the snapshot on applyCh.
-//
-func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int, snapshot []byte) bool {
-
-	// Your code here (2D).
-
-	return true
-}
-
-// the service says it has created a snapshot that has
-// all info up to and including index. this means the
-// service no longer needs the log through (and including)
-// that index. Raft should now trim its log as much as possible.
-// 把 index（包含）都打包为快照
-func (rf *Raft) Snapshot(index int, snapshot []byte) {
-	// Your code here (2D).
-	if index < rf.FirstLog().Index {
-		DPrintf("%v Cannot find index: %v log when Snapshot", rf.me, index)
-		return
-	}
-	rf.mu.Lock()
-	// 找到 index 在 log 的位置
-	realIndex := index - rf.FirstLog().Index
-	rf.lastIncludeTerm = rf.log[realIndex].Term
-	rf.lastIncludeIndex = rf.log[realIndex].Index
-	rf.snapshot = snapshot
-	rf.persistSaveStateAndSnapshot()
-	rf.mu.Unlock()
+	lastIncludedIndex int
+	lastIncludedTerm  int
 }
 
 //
@@ -395,22 +363,22 @@ func (rf *Raft) applyToStateMachine() {
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
 	rf := &Raft{
-		peers:            peers,
-		persister:        persister,
-		me:               me,
-		currentTerm:      0,
-		votedFor:         -1,
-		log:              make([]LogEntry, 0),
-		commitIndex:      0,
-		lastApplied:      0,
-		nextIndex:        make([]int, len(peers)),
-		matchIndex:       make([]int, len(peers)),
-		state:            Follower,
-		ElectTimer:       time.NewTimer(time.Duration(150) * time.Millisecond),
-		HeartBeatTimer:   time.NewTimer(time.Duration(150+rand.Float64()*150) * time.Millisecond),
-		applyCh:          applyCh,
-		lastIncludeIndex: -1,
-		lastIncludeTerm:  -1,
+		peers:             peers,
+		persister:         persister,
+		me:                me,
+		currentTerm:       0,
+		votedFor:          -1,
+		log:               make([]LogEntry, 0),
+		commitIndex:       0,
+		lastApplied:       0,
+		nextIndex:         make([]int, len(peers)),
+		matchIndex:        make([]int, len(peers)),
+		state:             Follower,
+		ElectTimer:        time.NewTimer(time.Duration(150) * time.Millisecond),
+		HeartBeatTimer:    time.NewTimer(time.Duration(150+rand.Float64()*150) * time.Millisecond),
+		applyCh:           applyCh,
+		lastIncludedIndex: -1,
+		lastIncludedTerm:  -1,
 	}
 	rf.applyCond = sync.NewCond(&rf.mu)
 	// Your initialization code here (2A, 2B, 2C).
