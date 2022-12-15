@@ -33,6 +33,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 }
 
 func (rf *Raft) HandleAppendEntries(server int) {
+	defer rf.persist()
 	rf.mu.Lock()
 	args := &AppendEntriesArgs{
 		Term:         rf.currentTerm,
@@ -77,6 +78,7 @@ func (rf *Raft) HandleAppendEntries(server int) {
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	defer rf.persist()
 	defer func() {
 		reply.Term = rf.currentTerm
 	}()

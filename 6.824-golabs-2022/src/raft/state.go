@@ -42,7 +42,6 @@ func (rf *Raft) toLeader() {
 func (rf *Raft) updateCommitIndex() {
 	for !rf.killed() {
 		// rf.mu.Lock()
-		time.Sleep(time.Duration(5) * time.Millisecond)
 		for i := rf.LastLog().Index; i > rf.commitIndex; i-- {
 			num := 0
 			for j := range rf.peers {

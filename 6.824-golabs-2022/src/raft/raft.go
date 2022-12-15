@@ -18,6 +18,8 @@ package raft
 //
 
 import (
+	"6.824/labgob"
+	"bytes"
 	"math/rand"
 	//	"bytes"
 	"sync"
@@ -105,12 +107,13 @@ func (rf *Raft) GetState() (int, bool) {
 func (rf *Raft) persist() {
 	// Your code here (2C).
 	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// data := w.Bytes()
-	// rf.persister.SaveRaftState(data)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.log)
+	data := w.Bytes()
+	rf.persister.SaveRaftState(data)
 }
 
 //
@@ -122,17 +125,11 @@ func (rf *Raft) readPersist(data []byte) {
 	}
 	// Your code here (2C).
 	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	d.Decode(&rf.currentTerm)
+	d.Decode(&rf.votedFor)
+	d.Decode(&rf.log)
 }
 
 //
@@ -184,6 +181,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	defer rf.persist()
 	defer func() { // 返回当前节点更新后的任期
 		reply.Term = rf.currentTerm
 	}()
@@ -270,6 +268,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		}
 		rf.log = append(rf.log, logEntry)
 		DPrintf("%v start append log %v success!\n", rf.me, logEntry)
+		rf.persist()
 		rf.mu.Unlock()
 	}
 	return index, term, isLeader
@@ -298,6 +297,7 @@ func (rf *Raft) killed() bool {
 }
 
 func (rf *Raft) StartElection() {
+	defer rf.persist()
 	DPrintf("%v Start Election!\n", rf.me)
 	rf.toCandidate()
 	rf.currentTerm = rf.currentTerm + 1 // 新一轮选举开始，任期+1
@@ -348,13 +348,13 @@ func (rf *Raft) BroadcastHeartBeat() {
 
 // ResetTimer
 func (rf *Raft) ElectTimerReset() { // 150 ms - 300 ms 之间
-	time := time.Duration(150+rand.Float64()*150) * time.Millisecond
+	time := time.Duration(300+rand.Intn(1000)) * time.Millisecond
 	DPrintf("%v ElectTimer reset to %v\n", rf.me, time)
 	rf.ElectTimer.Reset(time)
 }
 
 func (rf *Raft) HeartBeatTimerReset() { // 要比选举超时的时间要短
-	time := time.Duration(50) * time.Millisecond
+	time := time.Duration(150) * time.Millisecond
 	DPrintf("%v HeartBeatTimer reset to %v\n", rf.me, time)
 	rf.HeartBeatTimer.Reset(time)
 }
@@ -383,33 +383,27 @@ func (rf *Raft) ticker() {
 	}
 }
 
-func (rf *Raft) ApplyToStateMachine() {
+func (rf *Raft) applyToStateMachine() {
 	for !rf.killed() {
 		rf.mu.Lock()
-		commitIndex := rf.commitIndex
-		lastApplied := rf.lastApplied
-		rf.mu.Unlock()
-		if commitIndex == lastApplied {
-			rf.mu.Lock()
+		for rf.commitIndex == rf.lastApplied {
 			rf.applyCond.Wait()
-			rf.mu.Unlock()
-		} else {
-			for i := lastApplied + 1; i <= commitIndex; i++ {
-				rf.mu.Lock()
-				applyMsg := ApplyMsg{
-					Command:      rf.log[i].Command,
-					CommandIndex: i,
-					CommandValid: true,
-				}
-				rf.lastApplied = i
-				rf.applyCh <- applyMsg
-				rf.mu.Unlock()
-			}
-			rf.mu.Lock()
-			rf.lastApplied = Max(rf.lastApplied, commitIndex)
-			DPrintf("[%v Applied Log %v Success]\n", rf.me, lastApplied)
-			rf.mu.Unlock()
 		}
+		lastApplied := rf.lastApplied
+		commitIndex := rf.commitIndex
+		rf.mu.Unlock()
+		for i := lastApplied + 1; i <= commitIndex; i++ {
+			applyMsg := ApplyMsg{
+				Command:      rf.log[i].Command,
+				CommandIndex: i,
+				CommandValid: true,
+			}
+			rf.applyCh <- applyMsg
+		}
+		rf.mu.Lock()
+		rf.lastApplied = Max(rf.lastApplied, commitIndex)
+		DPrintf("[%v Applied Log %v Success, commitIndex: %v, lastApplied: %v]\n", rf.me, lastApplied, rf.commitIndex, rf.lastApplied)
+		rf.mu.Unlock()
 	}
 }
 
@@ -450,7 +444,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
-	go rf.ApplyToStateMachine()
+	go rf.applyToStateMachine()
 
 	return rf
 }
