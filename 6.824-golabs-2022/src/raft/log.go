@@ -23,6 +23,10 @@ type AppendEntriesReply struct {
 	Success bool
 }
 
+func (rf *Raft) FirstLog() LogEntry {
+	return rf.log[0]
+}
+
 func (rf *Raft) LastLog() LogEntry {
 	return rf.log[len(rf.log)-1]
 }

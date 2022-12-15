@@ -12,6 +12,14 @@ const (
 	Leader    State = 2
 )
 
+// return currentTerm and whether this server
+// believes it is the leader.
+func (rf *Raft) GetState() (int, bool) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	return rf.currentTerm, (rf.state == Leader)
+}
+
 func (rf *Raft) toFollower() {
 	DPrintf("%v turn to Follower!\n", rf.me)
 	rf.state = Follower

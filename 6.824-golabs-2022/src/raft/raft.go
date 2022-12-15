@@ -18,8 +18,6 @@ package raft
 //
 
 import (
-	"6.824/labgob"
-	"bytes"
 	"math/rand"
 	//	"bytes"
 	"sync"
@@ -62,15 +60,16 @@ type Raft struct {
 	persister *Persister          // Object to hold this peer's persisted state
 	me        int                 // this peer's index into peers[] 自己的编号
 	dead      int32               // set by Kill()
+	snapshot  []byte
 
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 
-	// Persistent state on all servers: 通用持久化状态，需要落盘，可恢复
+	// Persistent state on all servers: 持久化的状态，落盘，可恢复
 	currentTerm int        // 服务器已知最新的任期
 	votedFor    int        // 当前任期内收到选票的候选者id
-	log         []LogEntry //
+	log         []LogEntry // 日志
 
 	// Volatile state on all servers: 存在内存中，不落盘，用心跳等方式去更新。
 	commitIndex int // 被复制到半数以上的节点将标记为 Commit 状态
@@ -89,47 +88,10 @@ type Raft struct {
 
 	// 条件变量
 	applyCond *sync.Cond
-}
 
-// return currentTerm and whether this server
-// believes it is the leader.
-func (rf *Raft) GetState() (int, bool) {
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
-	return rf.currentTerm, (rf.state == Leader)
-}
-
-//
-// save Raft's persistent state to stable storage,
-// where it can later be retrieved after a crash and restart.
-// see paper's Figure 2 for a description of what should be persistent.
-//
-func (rf *Raft) persist() {
-	// Your code here (2C).
-	// Example:
-	w := new(bytes.Buffer)
-	e := labgob.NewEncoder(w)
-	e.Encode(rf.currentTerm)
-	e.Encode(rf.votedFor)
-	e.Encode(rf.log)
-	data := w.Bytes()
-	rf.persister.SaveRaftState(data)
-}
-
-//
-// restore previously persisted state.
-//
-func (rf *Raft) readPersist(data []byte) {
-	if data == nil || len(data) < 1 { // bootstrap without any state?
-		return
-	}
-	// Your code here (2C).
-	// Example:
-	r := bytes.NewBuffer(data)
-	d := labgob.NewDecoder(r)
-	d.Decode(&rf.currentTerm)
-	d.Decode(&rf.votedFor)
-	d.Decode(&rf.log)
+	// 上一次快照信息
+	lastIncludeIndex int
+	lastIncludeTerm  int
 }
 
 //
@@ -147,9 +109,21 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 // all info up to and including index. this means the
 // service no longer needs the log through (and including)
 // that index. Raft should now trim its log as much as possible.
+// 把 index（包含）都打包为快照
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (2D).
-
+	if index < rf.FirstLog().Index {
+		DPrintf("%v Cannot find index: %v log when Snapshot", rf.me, index)
+		return
+	}
+	rf.mu.Lock()
+	// 找到 index 在 log 的位置
+	realIndex := index - rf.FirstLog().Index
+	rf.lastIncludeTerm = rf.log[realIndex].Term
+	rf.lastIncludeIndex = rf.log[realIndex].Index
+	rf.snapshot = snapshot
+	rf.persistSaveStateAndSnapshot()
+	rf.mu.Unlock()
 }
 
 //
@@ -421,20 +395,22 @@ func (rf *Raft) applyToStateMachine() {
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
 	rf := &Raft{
-		peers:          peers,
-		persister:      persister,
-		me:             me,
-		currentTerm:    0,
-		votedFor:       -1,
-		log:            make([]LogEntry, 1),
-		commitIndex:    0,
-		lastApplied:    0,
-		nextIndex:      make([]int, len(peers)),
-		matchIndex:     make([]int, len(peers)),
-		state:          Follower,
-		ElectTimer:     time.NewTimer(time.Duration(150) * time.Millisecond),
-		HeartBeatTimer: time.NewTimer(time.Duration(150+rand.Float64()*150) * time.Millisecond),
-		applyCh:        applyCh,
+		peers:            peers,
+		persister:        persister,
+		me:               me,
+		currentTerm:      0,
+		votedFor:         -1,
+		log:              make([]LogEntry, 0),
+		commitIndex:      0,
+		lastApplied:      0,
+		nextIndex:        make([]int, len(peers)),
+		matchIndex:       make([]int, len(peers)),
+		state:            Follower,
+		ElectTimer:       time.NewTimer(time.Duration(150) * time.Millisecond),
+		HeartBeatTimer:   time.NewTimer(time.Duration(150+rand.Float64()*150) * time.Millisecond),
+		applyCh:          applyCh,
+		lastIncludeIndex: -1,
+		lastIncludeTerm:  -1,
 	}
 	rf.applyCond = sync.NewCond(&rf.mu)
 	// Your initialization code here (2A, 2B, 2C).
