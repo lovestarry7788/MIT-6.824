@@ -38,10 +38,10 @@ func (rf *Raft) toLeader() {
 	rf.matchIndex = make([]int, len(rf.peers))
 	for i := range rf.peers {
 		rf.nextIndex[i] = rf.commitIndex + 1
+		rf.matchIndex[i] = 0
 	}
-
-	go rf.updateCommitIndex()
 	// go rf.Start(nil)
+	go rf.updateCommitIndex()
 	// 立即开始心跳
 	rf.HeartBeatTimer.Reset(time.Duration(0))
 }
