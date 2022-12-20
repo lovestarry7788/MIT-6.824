@@ -62,10 +62,13 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 }
 
 func (rf *Raft) HandleAppendEntries(server int) {
-	defer rf.persist()
+	rf.mu.Lock()
+	if rf.state != Leader {
+		rf.mu.Unlock()
+		return
+	}
 	// 要复制的Index日志已经在快照中 / 可理解为 server 落后太多，raft采用 快照+持久化 的方式来恢复
 	if rf.nextIndex[server] <= rf.lastIncludedIndex {
-		rf.mu.Lock()
 		args := &InstallSnapshotArgs{
 			Term:              rf.currentTerm,
 			LeaderId:          rf.me,
@@ -89,6 +92,7 @@ func (rf *Raft) HandleAppendEntries(server int) {
 			rf.currentTerm = reply.Term
 			rf.toFollower()
 			rf.votedFor = -1
+			rf.persist()
 			return
 		}
 		rf.matchIndex[server] = rf.lastIncludedIndex
@@ -96,7 +100,7 @@ func (rf *Raft) HandleAppendEntries(server int) {
 		return
 	}
 
-	rf.mu.Lock()
+	DPrintf("[HandleAppendEntries] [me: %v, server: %v, PrevLogIndex: %v, PrevLogTerm: %v]\n", rf.me, server, rf.nextIndex[server]-1, rf.FindLog(rf.nextIndex[server]-1).Term)
 	args := &AppendEntriesArgs{
 		Term:         rf.currentTerm,
 		Leader:       rf.me,
@@ -130,6 +134,7 @@ func (rf *Raft) HandleAppendEntries(server int) {
 		rf.currentTerm = reply.Term
 		rf.toFollower()
 		rf.votedFor = -1
+		rf.persist()
 		return
 	}
 
@@ -150,7 +155,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Term = rf.currentTerm
 	}()
 
-	DPrintf("[AppendEntries] [args.PrevLogTerm: %v, args.PrevLogIndex: %v, args.Term: %v, rf.currentTerm: %v]\n", args.PrevLogTerm, args.PrevLogIndex, args.Term, rf.currentTerm)
+	DPrintf("[AppendEntries] [me: %v, args.PrevLogTerm: %v, args.PrevLogIndex: %v, args.Term: %v, rf.currentTerm: %v]\n", rf.me, args.PrevLogTerm, args.PrevLogIndex, args.Term, rf.currentTerm)
+	reply.Success = true
 	// term < currentTerm, reject.
 	if args.Term < rf.currentTerm {
 		reply.Success = false
@@ -163,13 +169,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.ElectTimerReset()
 	rf.toFollower()
 
-	if args.PrevLogIndex == -1 {
-		reply.Success = false
-		return
-	}
-
 	// 日志不一致，返回不成功 AppendEntries RPC implementation 2.
-	if args.PrevLogIndex != -1 && (args.PrevLogIndex >= len(rf.log) || rf.log[args.PrevLogIndex].Term != args.PrevLogTerm) {
+	if args.PrevLogIndex < rf.lastIncludedIndex || args.PrevLogIndex-rf.lastIncludedIndex > len(rf.log) || rf.FindLog(args.PrevLogIndex).Term != args.PrevLogTerm {
 		reply.Success = false
 		return
 	}
@@ -178,15 +179,15 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	i := 0
 	j := args.PrevLogIndex + 1
 	for i = 0; i < len(args.Entries); i++ {
-		if j >= len(rf.log) {
+		if j > rf.lastIncludedIndex+len(rf.log) {
 			break
-		} else if rf.log[j].Term == args.Entries[i].Term { // term 和 index 都相同
+		} else if rf.FindLog(j).Term == args.Entries[i].Term { // term 和 index 都相同
 			j++
 		} else {
-			rf.log = append(rf.log[:j], args.Entries[i:]...)
+			rf.log = append(rf.log[:(j-rf.lastIncludedIndex)], args.Entries[i:]...)
 			DPrintf("[log replicated success] [Entries: %v, me: %v]\n", args.Entries[i:], rf.me)
 			i = len(args.Entries)
-			j = len(rf.log) - 1
+			j = rf.lastIncludedIndex + len(rf.log)
 			break
 		}
 	}
@@ -194,7 +195,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if i < len(args.Entries) {
 		rf.log = append(rf.log, args.Entries[i:]...)
 		DPrintf("[log replicated success] [Entries: %v, me: %v]\n", args.Entries[i:], rf.me)
-		j = len(rf.log) - 1
+		j = rf.lastIncludedIndex + len(rf.log)
 	} else {
 		j-- // commitIndex
 	}
@@ -208,6 +209,4 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			rf.applyCond.Broadcast()
 		}
 	}
-
-	reply.Success = true
 }

@@ -57,12 +57,13 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	}
 	rf.mu.Lock()
 	// 找到 index 在 log 的位置
-	realIndex := index - rf.FirstLog().Index
+	realIndex := index - rf.FirstLog().Index - 1
 	rf.lastIncludedTerm = rf.log[realIndex].Term
 	rf.lastIncludedIndex = rf.log[realIndex].Index
 	rf.log = rf.log[realIndex+1:]
 	rf.snapshot = snapshot
 	rf.persistSaveStateAndSnapshot()
+	DPrintf("[Snapshot] [index: %v, readlIndex: %v, lastIncludedTerm: %v, lastIncludedIndex: %v, log: %v]\n", index, realIndex, rf.lastIncludedTerm, rf.lastIncludedIndex, rf.log)
 	rf.mu.Unlock()
 }
 

@@ -124,6 +124,9 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	defer rf.persist()
+	defer func() {
+		DPrintf("[RequestVote] [%v send RequestVote to %v, success: %v, args.Term: %v, rf.currentTerm: %v, rf.LastLog().Term: %v]\n", args.CandidateId, rf.me, reply.VoteGranted, args.Term, rf.currentTerm, rf.LastLog().Term)
+	}()
 	defer func() { // 返回当前节点更新后的任期
 		reply.Term = rf.currentTerm
 	}()
@@ -137,10 +140,12 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
 		rf.toFollower()
+		rf.votedFor = -1
 	}
 
 	// 3. 日志更完整（任期或序号更大）
-	if args.LastLogTerm > rf.LastLog().Term || (args.LastLogTerm == rf.LastLog().Term && args.LastLogIndex >= rf.LastLog().Index) {
+	if rf.LastLog().Term == 0 || args.LastLogTerm > rf.LastLog().Term || (args.LastLogTerm == rf.LastLog().Term && args.LastLogIndex >= rf.LastLog().Index) {
+		rf.ElectTimerReset()
 		rf.votedFor = args.CandidateId
 		reply.VoteGranted = true
 	}
@@ -242,7 +247,6 @@ func (rf *Raft) StartElection() {
 	defer rf.persist()
 	DPrintf("%v Start Election!\n", rf.me)
 	rf.toCandidate()
-	rf.currentTerm = rf.currentTerm + 1 // 新一轮选举开始，任期+1
 	voteNumber := 1
 	for i := range rf.peers {
 		if i == rf.me {
@@ -265,10 +269,10 @@ func (rf *Raft) StartElection() {
 					rf.currentTerm = reply.Term
 					rf.toFollower()
 					rf.votedFor = -1
-				} else if reply.Term == rf.currentTerm && reply.VoteGranted {
+				} else if reply.Term == rf.currentTerm && reply.VoteGranted && rf.state == Candidate {
 					voteNumber++
 					if voteNumber > len(rf.peers)/2 {
-						rf.toLeader()
+						go rf.toLeader()
 					}
 				}
 			}
@@ -278,6 +282,8 @@ func (rf *Raft) StartElection() {
 
 // 心跳检测
 func (rf *Raft) BroadcastHeartBeat() {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	if rf.state == Leader {
 		DPrintf("%v broadcast HeartBeat!", rf.me)
 		for i := range rf.peers {
@@ -290,7 +296,7 @@ func (rf *Raft) BroadcastHeartBeat() {
 
 // ResetTimer
 func (rf *Raft) ElectTimerReset() { // 150 ms - 300 ms 之间
-	time := time.Duration(300+rand.Intn(1000)) * time.Millisecond
+	time := time.Duration(300+rand.Float64()*1000) * time.Millisecond
 	DPrintf("%v ElectTimer reset to %v\n", rf.me, time)
 	rf.ElectTimer.Reset(time)
 }
@@ -310,17 +316,25 @@ func (rf *Raft) ticker() {
 		// time.Sleep().
 		select {
 		case <-rf.ElectTimer.C: // 选举超时
+			if rf.killed() {
+				break
+			}
 			rf.mu.Lock()
 			if rf.state != Leader {
 				rf.StartElection()
-				rf.ElectTimerReset()
 			}
+			rf.ElectTimerReset()
 			rf.mu.Unlock()
 		case <-rf.HeartBeatTimer.C: // 心跳检测
-			if rf.state == Leader {
-				rf.BroadcastHeartBeat()
-				rf.HeartBeatTimerReset()
+			if rf.killed() {
+				break
 			}
+			rf.mu.Lock()
+			if rf.state == Leader {
+				go rf.BroadcastHeartBeat()
+			}
+			rf.HeartBeatTimerReset()
+			rf.mu.Unlock()
 		}
 	}
 }
@@ -333,18 +347,16 @@ func (rf *Raft) applyToStateMachine() {
 		}
 		lastApplied := rf.lastApplied
 		commitIndex := rf.commitIndex
-		rf.mu.Unlock()
 		for i := lastApplied + 1; i <= commitIndex; i++ {
 			applyMsg := ApplyMsg{
-				Command:      rf.log[i].Command,
-				CommandIndex: i,
+				Command:      rf.FindLog(i).Command,
+				CommandIndex: rf.FindLog(i).Index,
 				CommandValid: true,
 			}
 			rf.applyCh <- applyMsg
 		}
-		rf.mu.Lock()
 		rf.lastApplied = Max(rf.lastApplied, commitIndex)
-		DPrintf("[%v Applied Log %v Success, commitIndex: %v, lastApplied: %v]\n", rf.me, lastApplied, rf.commitIndex, rf.lastApplied)
+		DPrintf("[applyToStateMachine] [%v Applied Log [%v, %v] Success, commitIndex: %v, lastApplied: %v]\n", rf.me, lastApplied+1, commitIndex, rf.commitIndex, rf.lastApplied)
 		rf.mu.Unlock()
 	}
 }
@@ -366,16 +378,17 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		peers:             peers,
 		persister:         persister,
 		me:                me,
+		snapshot:          persister.snapshot,
 		currentTerm:       0,
 		votedFor:          -1,
 		log:               make([]LogEntry, 0),
-		commitIndex:       0, // 一开始没有日志，第一条日志的位置是 0
+		commitIndex:       0, // 一开始没有日志，第一条日志的位置是 1
 		lastApplied:       0,
 		nextIndex:         make([]int, len(peers)),
 		matchIndex:        make([]int, len(peers)),
 		state:             Follower,
-		ElectTimer:        time.NewTimer(time.Duration(150) * time.Millisecond),
-		HeartBeatTimer:    time.NewTimer(time.Duration(150+rand.Float64()*150) * time.Millisecond),
+		ElectTimer:        time.NewTimer(time.Duration(300+rand.Float64()*1000) * time.Millisecond),
+		HeartBeatTimer:    time.NewTimer(time.Duration(150) * time.Millisecond),
 		applyCh:           applyCh,
 		lastIncludedIndex: 0,
 		lastIncludedTerm:  0,

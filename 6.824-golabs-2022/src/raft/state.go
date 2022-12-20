@@ -28,10 +28,13 @@ func (rf *Raft) toFollower() {
 func (rf *Raft) toCandidate() {
 	DPrintf("%v turn to Candidate!\n", rf.me)
 	rf.state = Candidate
+	rf.currentTerm = rf.currentTerm + 1
 	rf.votedFor = rf.me
 }
 
 func (rf *Raft) toLeader() {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	DPrintf("%v turn to Leader!\n", rf.me)
 	rf.state = Leader
 	rf.nextIndex = make([]int, len(rf.peers))
@@ -49,18 +52,22 @@ func (rf *Raft) toLeader() {
 // updateCommitIndex 5.3 启动协程，每次日志复制时都更新Index，等大多数日志的matchIndex[i] >= N 时，CommitIndex + 1
 func (rf *Raft) updateCommitIndex() {
 	for !rf.killed() {
-		// rf.mu.Lock()
+		time.Sleep(time.Duration(5) * time.Millisecond)
+		rf.mu.Lock()
+		if rf.state != Leader {
+			rf.mu.Unlock()
+			return
+		}
 		for i := rf.LastLog().Index; i > rf.commitIndex; i-- {
 			num := 0
 			for j := range rf.peers {
 				if j == rf.me {
 					continue
 				}
-				if rf.matchIndex[j] >= i && rf.currentTerm == rf.log[i].Term {
+				if rf.matchIndex[j] >= i && rf.currentTerm == rf.FindLog(i).Term {
 					num++
 				}
 			}
-
 			// 算上自己，超过半数
 			if num >= len(rf.peers)/2 {
 				DPrintf("[UpdateCommitIndex] [me: %v, commitIndex: %v]", rf.me, i)
@@ -69,6 +76,6 @@ func (rf *Raft) updateCommitIndex() {
 				break
 			}
 		}
-		// rf.mu.Unlock()
+		rf.mu.Unlock()
 	}
 }
