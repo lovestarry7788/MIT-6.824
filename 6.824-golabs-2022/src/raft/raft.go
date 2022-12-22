@@ -90,40 +90,8 @@ type Raft struct {
 	applyCond *sync.Cond
 
 	// 上一次快照信息
-	lastIncludeIndex int
-	lastIncludeTerm  int
-}
-
-//
-// A service wants to switch to snapshot.  Only do so if Raft hasn't
-// have more recent info since it communicate the snapshot on applyCh.
-//
-func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int, snapshot []byte) bool {
-
-	// Your code here (2D).
-
-	return true
-}
-
-// the service says it has created a snapshot that has
-// all info up to and including index. this means the
-// service no longer needs the log through (and including)
-// that index. Raft should now trim its log as much as possible.
-// 把 index（包含）都打包为快照
-func (rf *Raft) Snapshot(index int, snapshot []byte) {
-	// Your code here (2D).
-	if index < rf.FirstLog().Index {
-		DPrintf("%v Cannot find index: %v log when Snapshot", rf.me, index)
-		return
-	}
-	rf.mu.Lock()
-	// 找到 index 在 log 的位置
-	realIndex := index - rf.FirstLog().Index
-	rf.lastIncludeTerm = rf.log[realIndex].Term
-	rf.lastIncludeIndex = rf.log[realIndex].Index
-	rf.snapshot = snapshot
-	rf.persistSaveStateAndSnapshot()
-	rf.mu.Unlock()
+	lastIncludedIndex int
+	lastIncludedTerm  int
 }
 
 //
@@ -156,6 +124,9 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	defer rf.persist()
+	defer func() {
+		DPrintf("[RequestVote] [%v send RequestVote to %v, success: %v, args.Term: %v, rf.currentTerm: %v, rf.LastLog().Term: %v]\n", args.CandidateId, rf.me, reply.VoteGranted, args.Term, rf.currentTerm, rf.LastLog().Term)
+	}()
 	defer func() { // 返回当前节点更新后的任期
 		reply.Term = rf.currentTerm
 	}()
@@ -169,10 +140,12 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	if args.Term > rf.currentTerm {
 		rf.currentTerm = args.Term
 		rf.toFollower()
+		rf.votedFor = -1
 	}
 
 	// 3. 日志更完整（任期或序号更大）
-	if args.LastLogTerm > rf.LastLog().Term || (args.LastLogTerm == rf.LastLog().Term && args.LastLogIndex >= rf.LastLog().Index) {
+	if rf.LastLog().Term == 0 || args.LastLogTerm > rf.LastLog().Term || (args.LastLogTerm == rf.LastLog().Term && args.LastLogIndex >= rf.LastLog().Index) {
+		rf.ElectTimerReset()
 		rf.votedFor = args.CandidateId
 		reply.VoteGranted = true
 	}
@@ -233,7 +206,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	// Your code here (2B).
 	if isLeader {
 		rf.mu.Lock()
-		index = len(rf.log)
+		index = rf.LastLog().Index + 1
 		term = rf.currentTerm
 		logEntry := LogEntry{
 			Command: command,
@@ -274,7 +247,6 @@ func (rf *Raft) StartElection() {
 	defer rf.persist()
 	DPrintf("%v Start Election!\n", rf.me)
 	rf.toCandidate()
-	rf.currentTerm = rf.currentTerm + 1 // 新一轮选举开始，任期+1
 	voteNumber := 1
 	for i := range rf.peers {
 		if i == rf.me {
@@ -297,10 +269,10 @@ func (rf *Raft) StartElection() {
 					rf.currentTerm = reply.Term
 					rf.toFollower()
 					rf.votedFor = -1
-				} else if reply.Term == rf.currentTerm && reply.VoteGranted {
+				} else if reply.Term == rf.currentTerm && reply.VoteGranted && rf.state == Candidate {
 					voteNumber++
 					if voteNumber > len(rf.peers)/2 {
-						rf.toLeader()
+						go rf.toLeader()
 					}
 				}
 			}
@@ -310,6 +282,8 @@ func (rf *Raft) StartElection() {
 
 // 心跳检测
 func (rf *Raft) BroadcastHeartBeat() {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	if rf.state == Leader {
 		DPrintf("%v broadcast HeartBeat!", rf.me)
 		for i := range rf.peers {
@@ -322,7 +296,7 @@ func (rf *Raft) BroadcastHeartBeat() {
 
 // ResetTimer
 func (rf *Raft) ElectTimerReset() { // 150 ms - 300 ms 之间
-	time := time.Duration(300+rand.Intn(1000)) * time.Millisecond
+	time := time.Duration(300+rand.Float64()*1000) * time.Millisecond
 	DPrintf("%v ElectTimer reset to %v\n", rf.me, time)
 	rf.ElectTimer.Reset(time)
 }
@@ -342,17 +316,25 @@ func (rf *Raft) ticker() {
 		// time.Sleep().
 		select {
 		case <-rf.ElectTimer.C: // 选举超时
+			if rf.killed() {
+				break
+			}
 			rf.mu.Lock()
 			if rf.state != Leader {
 				rf.StartElection()
-				rf.ElectTimerReset()
 			}
+			rf.ElectTimerReset()
 			rf.mu.Unlock()
 		case <-rf.HeartBeatTimer.C: // 心跳检测
-			if rf.state == Leader {
-				rf.BroadcastHeartBeat()
-				rf.HeartBeatTimerReset()
+			if rf.killed() {
+				break
 			}
+			rf.mu.Lock()
+			if rf.state == Leader {
+				go rf.BroadcastHeartBeat()
+			}
+			rf.HeartBeatTimerReset()
+			rf.mu.Unlock()
 		}
 	}
 }
@@ -365,18 +347,23 @@ func (rf *Raft) applyToStateMachine() {
 		}
 		lastApplied := rf.lastApplied
 		commitIndex := rf.commitIndex
-		rf.mu.Unlock()
+		applyMsg := make([]ApplyMsg, 0)
 		for i := lastApplied + 1; i <= commitIndex; i++ {
-			applyMsg := ApplyMsg{
-				Command:      rf.log[i].Command,
-				CommandIndex: i,
+			applyMsg = append(applyMsg, ApplyMsg{
+				Command:      rf.FindLog(i).Command,
+				CommandIndex: rf.FindLog(i).Index,
 				CommandValid: true,
-			}
-			rf.applyCh <- applyMsg
+			})
 		}
+		rf.mu.Unlock()
+
+		for _, msg := range applyMsg {
+			rf.applyCh <- msg
+		}
+
 		rf.mu.Lock()
 		rf.lastApplied = Max(rf.lastApplied, commitIndex)
-		DPrintf("[%v Applied Log %v Success, commitIndex: %v, lastApplied: %v]\n", rf.me, lastApplied, rf.commitIndex, rf.lastApplied)
+		DPrintf("[applyToStateMachine] [%v Applied Log [%v, %v] Success, commitIndex: %v, lastApplied: %v, log: %+v]\n", rf.me, lastApplied+1, commitIndex, rf.commitIndex, rf.lastApplied, applyMsg)
 		rf.mu.Unlock()
 	}
 }
@@ -395,28 +382,32 @@ func (rf *Raft) applyToStateMachine() {
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
 	rf := &Raft{
-		peers:            peers,
-		persister:        persister,
-		me:               me,
-		currentTerm:      0,
-		votedFor:         -1,
-		log:              make([]LogEntry, 0),
-		commitIndex:      0,
-		lastApplied:      0,
-		nextIndex:        make([]int, len(peers)),
-		matchIndex:       make([]int, len(peers)),
-		state:            Follower,
-		ElectTimer:       time.NewTimer(time.Duration(150) * time.Millisecond),
-		HeartBeatTimer:   time.NewTimer(time.Duration(150+rand.Float64()*150) * time.Millisecond),
-		applyCh:          applyCh,
-		lastIncludeIndex: -1,
-		lastIncludeTerm:  -1,
+		peers:             peers,
+		persister:         persister,
+		me:                me,
+		snapshot:          persister.snapshot,
+		currentTerm:       0,
+		votedFor:          -1,
+		log:               make([]LogEntry, 0),
+		commitIndex:       0, // 一开始没有日志，第一条日志的位置是 1
+		lastApplied:       0,
+		nextIndex:         make([]int, len(peers)),
+		matchIndex:        make([]int, len(peers)),
+		state:             Follower,
+		ElectTimer:        time.NewTimer(time.Duration(300+rand.Float64()*1000) * time.Millisecond),
+		HeartBeatTimer:    time.NewTimer(time.Duration(150) * time.Millisecond),
+		applyCh:           applyCh,
+		lastIncludedIndex: 0,
+		lastIncludedTerm:  0,
 	}
 	rf.applyCond = sync.NewCond(&rf.mu)
 	// Your initialization code here (2A, 2B, 2C).
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
+	rf.lastApplied = rf.lastIncludedIndex
+	rf.commitIndex = rf.lastIncludedIndex
+	DPrintf("me: %v, log: %v\n", rf.me, rf.log)
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
