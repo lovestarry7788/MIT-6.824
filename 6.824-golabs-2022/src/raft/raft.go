@@ -347,16 +347,23 @@ func (rf *Raft) applyToStateMachine() {
 		}
 		lastApplied := rf.lastApplied
 		commitIndex := rf.commitIndex
+		applyMsg := make([]ApplyMsg, 0)
 		for i := lastApplied + 1; i <= commitIndex; i++ {
-			applyMsg := ApplyMsg{
+			applyMsg = append(applyMsg, ApplyMsg{
 				Command:      rf.FindLog(i).Command,
 				CommandIndex: rf.FindLog(i).Index,
 				CommandValid: true,
-			}
-			rf.applyCh <- applyMsg
+			})
 		}
+		rf.mu.Unlock()
+
+		for _, msg := range applyMsg {
+			rf.applyCh <- msg
+		}
+
+		rf.mu.Lock()
 		rf.lastApplied = Max(rf.lastApplied, commitIndex)
-		DPrintf("[applyToStateMachine] [%v Applied Log [%v, %v] Success, commitIndex: %v, lastApplied: %v]\n", rf.me, lastApplied+1, commitIndex, rf.commitIndex, rf.lastApplied)
+		DPrintf("[applyToStateMachine] [%v Applied Log [%v, %v] Success, commitIndex: %v, lastApplied: %v, log: %+v]\n", rf.me, lastApplied+1, commitIndex, rf.commitIndex, rf.lastApplied, applyMsg)
 		rf.mu.Unlock()
 	}
 }
@@ -398,6 +405,9 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
+	rf.lastApplied = rf.lastIncludedIndex
+	rf.commitIndex = rf.lastIncludedIndex
+	DPrintf("me: %v, log: %v\n", rf.me, rf.log)
 
 	// start ticker goroutine to start elections
 	go rf.ticker()

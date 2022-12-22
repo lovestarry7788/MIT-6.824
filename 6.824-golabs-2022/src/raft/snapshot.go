@@ -5,7 +5,7 @@ type InstallSnapshotArgs struct {
 	LeaderId          int
 	LastIncludedIndex int
 	LastIncludedTerm  int
-	data              []byte
+	Data              []byte
 }
 
 type InstallSnapshotReply struct {
@@ -19,20 +19,22 @@ type InstallSnapshotReply struct {
 // tester
 func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int, snapshot []byte) bool {
 	// Your code here (2D).
-
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	// 快照过期，安装快照失败，即使没有更新到状态机，协程也在尝试更新，没有必要再同步
 	if lastIncludedIndex <= rf.commitIndex {
 		DPrintf("%v CondInstallSnapshot fault\n", rf.me)
 		return false
 	}
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
+
 	// 快照比最后一个还大
 	if lastIncludedIndex > rf.LastLog().Index {
 		rf.log = make([]LogEntry, 0)
-	} else { // 否则一定在log中出现，因为前面有 lastIncludedIndex <= rf.commitIndex
-		realIndex := lastIncludedIndex - rf.FirstLog().Index
-		rf.log = rf.log[realIndex:]
+	} else if lastIncludedIndex > rf.lastIncludedIndex { // 否则一定在log中出现，因为前面有 lastIncludedIndex <= rf.commitIndex
+		if len(rf.log) > 0 {
+			realIndex := lastIncludedIndex - rf.FirstLog().Index + 1
+			rf.log = rf.log[realIndex:]
+		}
 	}
 	rf.lastIncludedTerm = lastIncludedTerm
 	rf.lastIncludedIndex = lastIncludedIndex
@@ -40,7 +42,7 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 	rf.lastApplied = lastIncludedIndex
 	rf.snapshot = snapshot
 	rf.persistSaveStateAndSnapshot()
-
+	DPrintf("[CondInstallSnapshot] [me: %v, rf.lastIncludedIndex: %v]\n", rf.me, rf.lastIncludedIndex)
 	return true
 }
 
@@ -48,23 +50,26 @@ func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int,
 // all info up to and including index. this means the
 // service no longer needs the log through (and including)
 // that index. Raft should now trim its log as much as possible.
-// 把 index（包含）都打包为快照
+// 把 index（包含）之前都打包为快照
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (2D).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
 	if index <= rf.lastIncludedIndex {
-		DPrintf("%v Cannot find index: %v log when Snapshot", rf.me, index)
+		DPrintf("%v Cannot find index: %v log when Snapshot\n", rf.me, index)
+		return
+	} else if index > rf.lastIncludedIndex+len(rf.log) {
+		DPrintf("Index %v is not within the scope of log\n", index)
 		return
 	}
-	rf.mu.Lock()
 	// 找到 index 在 log 的位置
-	realIndex := index - rf.FirstLog().Index - 1
+	realIndex := index - rf.FirstLog().Index
 	rf.lastIncludedTerm = rf.log[realIndex].Term
 	rf.lastIncludedIndex = rf.log[realIndex].Index
 	rf.log = rf.log[realIndex+1:]
 	rf.snapshot = snapshot
 	rf.persistSaveStateAndSnapshot()
-	DPrintf("[Snapshot] [index: %v, readlIndex: %v, lastIncludedTerm: %v, lastIncludedIndex: %v, log: %v]\n", index, realIndex, rf.lastIncludedTerm, rf.lastIncludedIndex, rf.log)
-	rf.mu.Unlock()
+	DPrintf("[Snapshot] [me: %v, index: %v, log: %v, snapshot: %v]\n", rf.me, index, rf.log, snapshot)
 }
 
 func (rf *Raft) sendInstallSnapshot(server int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) bool {
@@ -80,13 +85,13 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	defer func() {
 		reply.Term = rf.currentTerm
 	}()
-	DPrintf("[InstallSnapshot] [args.PrevLogTerm: %v, args.PrevLogIndex: %v, args.Term: %v, rf.currentTerm: %v]\n", args.LastIncludedTerm, args.LastIncludedIndex, args.Term, rf.currentTerm)
+	DPrintf("[InstallSnapshot] [me: %v, args.Snapshot: %v]\n", rf.me, args.Data)
 	// term < currentTerm, reject.
 	if args.Term < rf.currentTerm {
 		return
 	} else if args.Term > rf.currentTerm { // Turn to follower if find a leader.
 		rf.votedFor = -1
-		args.Term = rf.currentTerm
+		rf.currentTerm = args.Term
 	}
 	rf.ElectTimerReset()
 	rf.toFollower()
@@ -98,10 +103,12 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	// rf.commitIndex = args.LastIncludedIndex
 	// rf.lastApplied = args.LastIncludedIndex
 
-	rf.applyCh <- ApplyMsg{
-		SnapshotValid: true,
-		Snapshot:      args.data,
-		SnapshotTerm:  args.LastIncludedTerm,
-		SnapshotIndex: args.LastIncludedIndex,
-	}
+	go func() {
+		rf.applyCh <- ApplyMsg{
+			SnapshotValid: true,
+			Snapshot:      args.Data,
+			SnapshotTerm:  args.LastIncludedTerm,
+			SnapshotIndex: args.LastIncludedIndex,
+		}
+	}()
 }
