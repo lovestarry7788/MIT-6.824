@@ -50,26 +50,9 @@ func (rf *Raft) FindLog(idx int) LogEntry {
 	} else if len(rf.log) == 0 {
 		panic("Cannot Find the log0.")
 	} else {
-		L, R, ret := 0, len(rf.log)-1, 0
-		for {
-			if L > R {
-				break
-			}
-			mid := (L + R) / 2
-			if rf.log[mid].Index <= idx {
-				ret = mid
-				L = mid + 1
-			} else {
-				R = mid - 1
-			}
-		}
-		if rf.log[ret].Index == idx {
-			return rf.log[ret]
-		} else {
-			DPrintf("[FindLog] [rf.log: %v, rf.log.index: %v, index: %v, ret: %v]\n", rf.log, rf.log[ret].Index, idx, ret)
-			panic("Cannot Find the log1.")
-		}
+		return rf.log[idx-rf.lastIncludedIndex-1]
 	}
+
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {

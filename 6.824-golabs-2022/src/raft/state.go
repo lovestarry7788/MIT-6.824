@@ -43,7 +43,6 @@ func (rf *Raft) toLeader() {
 		rf.nextIndex[i] = rf.commitIndex + 1
 		rf.matchIndex[i] = 0
 	}
-	go rf.Start(nil)
 	go rf.updateCommitIndex()
 	// 立即开始心跳
 	rf.HeartBeatTimer.Reset(time.Duration(0))

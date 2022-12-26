@@ -295,7 +295,7 @@ func (rf *Raft) BroadcastHeartBeat() {
 }
 
 // ResetTimer
-func (rf *Raft) ElectTimerReset() { // 150 ms - 300 ms 之间
+func (rf *Raft) ElectTimerReset() {
 	time := time.Duration(300+rand.Float64()*1000) * time.Millisecond
 	DPrintf("%v ElectTimer reset to %v\n", rf.me, time)
 	rf.ElectTimer.Reset(time)
@@ -316,14 +316,14 @@ func (rf *Raft) ticker() {
 		// time.Sleep().
 		select {
 		case <-rf.ElectTimer.C: // 选举超时
-			if rf.killed() {
+			if rf.killed() { // 可能阻塞前没有 killed，阻塞后被 killed 了。
 				break
 			}
 			rf.mu.Lock()
 			if rf.state != Leader {
 				rf.StartElection()
+				rf.ElectTimerReset()
 			}
-			rf.ElectTimerReset()
 			rf.mu.Unlock()
 		case <-rf.HeartBeatTimer.C: // 心跳检测
 			if rf.killed() {
@@ -332,8 +332,8 @@ func (rf *Raft) ticker() {
 			rf.mu.Lock()
 			if rf.state == Leader {
 				go rf.BroadcastHeartBeat()
+				rf.HeartBeatTimerReset()
 			}
-			rf.HeartBeatTimerReset()
 			rf.mu.Unlock()
 		}
 	}
