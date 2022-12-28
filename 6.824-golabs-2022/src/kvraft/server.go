@@ -7,6 +7,7 @@ import (
 	"log"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 const Debug = false
@@ -18,11 +19,14 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 	return
 }
 
-
 type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+	Key string
+	Value string
+	Op string
+	ClientId int64
 }
 
 type KVServer struct {
@@ -35,15 +39,92 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
+	data    map[string]string
+	replyCh map[IndexAndTerm]chan CommonReply
+	replyMap map[int64]bool // 幂等
+
 }
 
+type IndexAndTerm struct {
+	Index int
+	Term  int
+}
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
+	cmd := Op{Key: args.Key, Value: "", Op: "Get", ClientId: args.ClientId}
+	reply.Err, reply.Value = kv.ProcessCommandHandler(cmd)
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
+	cmd := Op{Key: args.Key, Value: args.Value, Op: args.Op, ClientId: args.ClientId}
+	reply.Err, _ = kv.ProcessCommandHandler(cmd)
+}
+
+func (kv *KVServer) IsDuplicate(cmd Op) bool {
+	return kv.replyMap[cmd.ClientId]
+}
+
+func (kv *KVServer) ProcessCommandHandler(cmd Op) (Err, string){
+	var err Err
+	var value string
+	kv.mu.Lock()
+	if cmd.Op != "Get" && kv.IsDuplicate(cmd) {
+		kv.mu.Unlock()
+		return OK, ""
+	}
+	index, term, isLeader := kv.rf.Start(cmd)
+	if !isLeader {
+		err, value = ErrWrongLeader, ""
+		return err, value
+	}
+	it := IndexAndTerm{
+		Index: index,
+		Term:  term,
+	}
+	ch := make(chan CommonReply, 1)
+	kv.replyCh[it] = ch
+	kv.mu.Unlock()
+
+	select {
+	case replyMsg := <-ch:
+		err, value = replyMsg.Err,replyMsg.Value
+	case <-time.After(replyTimeOut):
+		err, value = ErrTimeOut, ""
+	}
+	return err, value
+}
+
+func (kv *KVServer) applier() {
+	for !kv.killed() {
+		msg := <-kv.applyCh
+		if kv.killed() {
+			break
+		}
+		if msg.CommandValid {
+			kv.handleCommand(msg)
+		} else if msg.SnapshotValid {
+			kv.handleSnapshot(msg)
+		}
+	}
+}
+
+func (kv *KVServer) handleCommand(msg raft.ApplyMsg) {
+	op := msg.Command.
+	switch msg.Command.(type) {
+	case GetArgs:
+
+	case PutAppendArgs:
+		reply := CommonReply{}
+		if value, ok := kv.data[msg.Command.(Op)]; ok {
+
+		}
+	}
+}
+
+func (kv *KVServer) handleSnapshot(msg raft.ApplyMsg) {
+
 }
 
 //
