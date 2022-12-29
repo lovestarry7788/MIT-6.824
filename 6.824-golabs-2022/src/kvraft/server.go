@@ -4,13 +4,14 @@ import (
 	"6.824/labgob"
 	"6.824/labrpc"
 	"6.824/raft"
+	"bytes"
 	"log"
 	"sync"
 	"sync/atomic"
 	"time"
 )
 
-const Debug = false
+const Debug = true
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug {
@@ -23,10 +24,11 @@ type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
-	Key string
-	Value string
-	Op string
-	ClientId int64
+	Key       string
+	Value     string
+	Op        string
+	ClientId  int64
+	CommandId int64
 }
 
 type KVServer struct {
@@ -39,10 +41,10 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
-	data    map[string]string
-	replyCh map[IndexAndTerm]chan CommonReply
-	replyMap map[int64]bool // 幂等
-
+	data        map[string]string
+	replyCh     map[IndexAndTerm]chan CommonReply
+	cmd         map[ClientAndCommand]bool // 幂等
+	lastApplied int
 }
 
 type IndexAndTerm struct {
@@ -50,23 +52,32 @@ type IndexAndTerm struct {
 	Term  int
 }
 
+type ClientAndCommand struct {
+	ClientId  int64
+	CommandId int64
+}
+
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
-	cmd := Op{Key: args.Key, Value: "", Op: "Get", ClientId: args.ClientId}
+	cmd := Op{Key: args.Key, Value: "", Op: "Get", ClientId: args.ClientId, CommandId: args.CommandId}
 	reply.Err, reply.Value = kv.ProcessCommandHandler(cmd)
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
-	cmd := Op{Key: args.Key, Value: args.Value, Op: args.Op, ClientId: args.ClientId}
+	cmd := Op{Key: args.Key, Value: args.Value, Op: args.Op, ClientId: args.ClientId, CommandId: args.CommandId}
 	reply.Err, _ = kv.ProcessCommandHandler(cmd)
 }
 
 func (kv *KVServer) IsDuplicate(cmd Op) bool {
-	return kv.replyMap[cmd.ClientId]
+	clientAndcommand := ClientAndCommand{
+		ClientId:  cmd.ClientId,
+		CommandId: cmd.CommandId,
+	}
+	return kv.cmd[clientAndcommand]
 }
 
-func (kv *KVServer) ProcessCommandHandler(cmd Op) (Err, string){
+func (kv *KVServer) ProcessCommandHandler(cmd Op) (Err, string) {
 	var err Err
 	var value string
 	kv.mu.Lock()
@@ -85,20 +96,33 @@ func (kv *KVServer) ProcessCommandHandler(cmd Op) (Err, string){
 	}
 	ch := make(chan CommonReply, 1)
 	kv.replyCh[it] = ch
+	DPrintf("[ProcessCommandHandler] [cmd: %v, it: %v]\n", cmd, it)
 	kv.mu.Unlock()
 
 	select {
 	case replyMsg := <-ch:
-		err, value = replyMsg.Err,replyMsg.Value
+		err, value = replyMsg.Err, replyMsg.Value
 	case <-time.After(replyTimeOut):
 		err, value = ErrTimeOut, ""
 	}
+
+	go func() {
+		kv.mu.Lock()
+		defer kv.mu.Unlock()
+		ch, ok := kv.replyCh[it]
+		if !ok {
+			return
+		}
+		close(ch)
+		delete(kv.replyCh, it)
+	}()
+
 	return err, value
 }
 
 func (kv *KVServer) applier() {
 	for !kv.killed() {
-		msg := <-kv.applyCh
+		msg := <-kv.applyCh // raft.ApplyMsg
 		if kv.killed() {
 			break
 		}
@@ -111,20 +135,69 @@ func (kv *KVServer) applier() {
 }
 
 func (kv *KVServer) handleCommand(msg raft.ApplyMsg) {
-	op := msg.Command.
-	switch msg.Command.(type) {
-	case GetArgs:
+	op := msg.Command.(Op)
+	reply := CommonReply{}
 
-	case PutAppendArgs:
-		reply := CommonReply{}
-		if value, ok := kv.data[msg.Command.(Op)]; ok {
+	kv.mu.Lock()
+	if msg.CommandIndex <= kv.lastApplied {
+		kv.mu.Unlock()
+		return
+	}
 
+	if op.Op != "Get" && kv.IsDuplicate(op) {
+		reply = CommonReply{OK, ""}
+	} else {
+		switch op.Op {
+		case "Get":
+			if value, ok := kv.data[op.Key]; ok {
+				reply = CommonReply{OK, value}
+			} else {
+				reply = CommonReply{ErrNoKey, ""}
+			}
+		case "Put":
+			kv.data[op.Key] = op.Value
+			reply = CommonReply{OK, ""}
+		case "Append":
+			kv.data[op.Key] += op.Value
+			reply = CommonReply{OK, ""}
 		}
 	}
+
+	if replyCh, ok := kv.replyCh[IndexAndTerm{msg.CommandIndex, msg.CommandTerm}]; ok {
+		replyCh <- reply
+		DPrintf("[kv.handleCommand] [msg: %+v is applied]\n", msg)
+	}
+
+	clientAndcommand := ClientAndCommand{
+		ClientId:  op.ClientId,
+		CommandId: op.CommandId,
+	}
+	kv.cmd[clientAndcommand] = true
+	kv.lastApplied = msg.CommandIndex
+
+	kv.mu.Unlock()
 }
 
 func (kv *KVServer) handleSnapshot(msg raft.ApplyMsg) {
+	kv.mu.Lock()
+	if msg.SnapshotIndex <= kv.lastApplied {
+		kv.mu.Unlock()
+		return
+	}
+	if kv.rf.CondInstallSnapshot(msg.SnapshotTerm, msg.SnapshotIndex, msg.Snapshot) {
+		kv.lastApplied = msg.SnapshotIndex
+		kv.readSnapshot(msg.Snapshot)
+	}
+}
 
+func (kv *KVServer) readSnapshot(data []byte) {
+	if data == nil || len(data) < 1 { // bootstrap without any state?
+		return
+	}
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	d.Decode(&kv.data)
+	d.Decode(&kv.cmd)
 }
 
 //
@@ -177,6 +250,11 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	// You may need initialization code here.
+	kv.data = make(map[string]string)
+	kv.replyCh = make(map[IndexAndTerm]chan CommonReply)
+	kv.cmd = make(map[ClientAndCommand]bool)
+	// kv.readSnapshot()
+	go kv.applier()
 
 	return kv
 }

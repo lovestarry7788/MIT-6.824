@@ -7,17 +7,18 @@ const (
 	ErrNoKey       = "ErrNoKey"
 	ErrWrongLeader = "ErrWrongLeader"
 	ErrTimeOut     = "ErrTimeOut"
-	replyTimeOut   = time.Duration(500)
+	replyTimeOut   = time.Duration(500) * time.Millisecond
 )
 
 type Err string
 
 // Put or Append
 type PutAppendArgs struct {
-	Key      string
-	Value    string
-	Op       string // "Put" or "Append"
-	ClientId int64
+	Key       string
+	Value     string
+	Op        string // "Put" or "Append"
+	CommandId int64
+	ClientId  int64
 	// You'll have to add definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
@@ -28,8 +29,9 @@ type PutAppendReply struct {
 }
 
 type GetArgs struct {
-	Key      string
-	ClientId int64
+	Key       string
+	CommandId int64
+	ClientId  int64
 	// You'll have to add definitions here.
 }
 

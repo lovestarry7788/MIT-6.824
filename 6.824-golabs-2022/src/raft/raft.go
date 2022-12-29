@@ -43,6 +43,7 @@ type ApplyMsg struct {
 	CommandValid bool
 	Command      interface{}
 	CommandIndex int
+	CommandTerm  int
 
 	// For 2D:
 	SnapshotValid bool
@@ -352,6 +353,7 @@ func (rf *Raft) applyToStateMachine() {
 			applyMsg = append(applyMsg, ApplyMsg{
 				Command:      rf.FindLog(i).Command,
 				CommandIndex: rf.FindLog(i).Index,
+				CommandTerm:  rf.FindLog(i).Term,
 				CommandValid: true,
 			})
 		}
