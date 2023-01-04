@@ -123,7 +123,7 @@ func (sc *ShardCtrler) applier() {
 func (sc *ShardCtrler) handleCommand(msg raft.ApplyMsg) {
 	op := msg.Command.(Op)
 	reply := CommonReply{}
-
+	DPrintf("[ShardCtrler.handleCommand] [msg:%+v] \n", msg)
 	sc.mu.Lock()
 	if msg.CommandIndex <= sc.lastApplied {
 		sc.mu.Unlock()
@@ -191,8 +191,30 @@ func (sc *ShardCtrler) handleCommand(msg raft.ApplyMsg) {
 	sc.mu.Unlock()
 }
 
-func (sc *ShardCtrler) distributeShards(groups map[int][]string) [NShards]int {
-
+func (sc *ShardCtrler) distributeShards(groups map[int][]string) (shards [NShards]int) {
+	if len(groups) == 0 {
+		return
+	}
+	gIds, i := make([]int, len(groups)), 0
+	for gId := range groups {
+		gIds[i] = gId
+		i++
+	}
+	average := NShards / len(gIds)
+	if average == 0 {
+		for shard := range shards {
+			shards[shard] = gIds[shard]
+		}
+	} else {
+		for shard := range shards {
+			if shards[shard]/average >= len(gIds) {
+				shards[shard] = gIds[len(gIds)-1]
+			} else {
+				shards[shard] = gIds[shard/average]
+			}
+		}
+	}
+	return
 }
 
 func (sc *ShardCtrler) handleSnapshot(msg raft.ApplyMsg) {
@@ -233,6 +255,13 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister)
 	sc.rf = raft.Make(servers, me, persister, sc.applyCh)
 
 	// Your code here.
+	sc.cmd = make(map[int64]int64)
+	sc.replyCh = make(map[IndexAndTerm]chan CommonReply)
+	sc.configs = make([]Config, 1)
+	sc.configs[0].Num = 0
+	sc.configs[0].Groups = make(map[int][]string)
+
+	go sc.applier()
 
 	return sc
 }
