@@ -95,6 +95,14 @@ type Raft struct {
 	lastIncludedTerm  int
 }
 
+func (rf *Raft) GetSnapshot() []byte {
+	return rf.persister.ReadSnapshot()
+}
+
+func (rf *Raft) GetRaftStateSize() int {
+	return rf.persister.RaftStateSize()
+}
+
 //
 // example RequestVote RPC arguments structure.
 // field names must start with capital letters!
@@ -217,6 +225,10 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		rf.log = append(rf.log, logEntry)
 		DPrintf("%v start append log %v success!\n", rf.me, logEntry)
 		rf.persist()
+
+		// 立马进行一次心跳
+		go rf.BroadcastHeartBeat()
+
 		rf.mu.Unlock()
 	}
 	return index, term, isLeader
@@ -293,6 +305,7 @@ func (rf *Raft) BroadcastHeartBeat() {
 			}
 		}
 	}
+	rf.HeartBeatTimerReset()
 }
 
 // ResetTimer
@@ -333,7 +346,6 @@ func (rf *Raft) ticker() {
 			rf.mu.Lock()
 			if rf.state == Leader {
 				go rf.BroadcastHeartBeat()
-				rf.HeartBeatTimerReset()
 			}
 			rf.mu.Unlock()
 		}

@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-const Debug = true
+const Debug = false
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug {
@@ -41,9 +41,10 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
-	data        map[string]string
-	replyCh     map[IndexAndTerm]chan CommonReply
-	cmd         map[ClientAndCommand]bool // 幂等
+	data    map[string]string
+	replyCh map[IndexAndTerm]chan CommonReply
+	// cmd         map[ClientAndCommand]bool // 幂等
+	cmd         map[int64]int64 // 对于每个 Client 执行到哪个 Command
 	lastApplied int
 }
 
@@ -70,16 +71,13 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 }
 
 func (kv *KVServer) IsDuplicate(cmd Op) bool {
-	clientAndcommand := ClientAndCommand{
-		ClientId:  cmd.ClientId,
-		CommandId: cmd.CommandId,
-	}
-	return kv.cmd[clientAndcommand]
+	return kv.cmd[cmd.ClientId] >= cmd.CommandId
 }
 
 func (kv *KVServer) ProcessCommandHandler(cmd Op) (Err, string) {
 	var err Err
 	var value string
+	DPrintf("[Server.ProcessCommandHandler] [me: %v, cmd: %+v]\n", kv.me, cmd)
 	kv.mu.Lock()
 	if cmd.Op != "Get" && kv.IsDuplicate(cmd) {
 		kv.mu.Unlock()
@@ -88,6 +86,8 @@ func (kv *KVServer) ProcessCommandHandler(cmd Op) (Err, string) {
 	index, term, isLeader := kv.rf.Start(cmd)
 	if !isLeader {
 		err, value = ErrWrongLeader, ""
+		DPrintf("[Server.ProcessCommandHandler] [me: %v isn't Leader]\n", kv.me)
+		kv.mu.Unlock()
 		return err, value
 	}
 	it := IndexAndTerm{
@@ -96,7 +96,7 @@ func (kv *KVServer) ProcessCommandHandler(cmd Op) (Err, string) {
 	}
 	ch := make(chan CommonReply, 1)
 	kv.replyCh[it] = ch
-	DPrintf("[ProcessCommandHandler] [cmd: %v, it: %v]\n", cmd, it)
+	DPrintf("[Server.ProcessCommandHandler] [cmd: %v, it: %v]\n", cmd, it)
 	kv.mu.Unlock()
 
 	select {
@@ -106,7 +106,7 @@ func (kv *KVServer) ProcessCommandHandler(cmd Op) (Err, string) {
 		err, value = ErrTimeOut, ""
 	}
 
-	go func() {
+	go func() { // 关闭管道
 		kv.mu.Lock()
 		defer kv.mu.Unlock()
 		ch, ok := kv.replyCh[it]
@@ -167,13 +167,27 @@ func (kv *KVServer) handleCommand(msg raft.ApplyMsg) {
 		replyCh <- reply
 		DPrintf("[kv.handleCommand] [msg: %+v is applied]\n", msg)
 	}
-
-	clientAndcommand := ClientAndCommand{
-		ClientId:  op.ClientId,
-		CommandId: op.CommandId,
-	}
-	kv.cmd[clientAndcommand] = true
+	/*
+		clientAndcommand := ClientAndCommand{
+			ClientId:  op.ClientId,
+			CommandId: op.CommandId,
+		}
+		kv.cmd[clientAndcommand] = true
+	*/
+	kv.cmd[op.ClientId] = op.CommandId
 	kv.lastApplied = msg.CommandIndex
+
+	if kv.maxraftstate != -1 && (float32(kv.rf.GetRaftStateSize())/float32(kv.maxraftstate) > 0.9) {
+		// 创建快照
+		DPrintf("[handleCommand] [kv.rf.GetRaftStateSize: %v, kv.maxraftstate: %v]\n", kv.rf.GetRaftStateSize(), kv.maxraftstate)
+		w := new(bytes.Buffer)
+		e := labgob.NewEncoder(w)
+		e.Encode(kv.data)
+		e.Encode(kv.cmd)
+		Snapshot := w.Bytes()
+		go kv.rf.Snapshot(msg.CommandIndex, Snapshot)
+		DPrintf("[handleCommand] [me: %v, Create snapshot success!]\n", kv.me)
+	}
 
 	kv.mu.Unlock()
 }
@@ -188,6 +202,7 @@ func (kv *KVServer) handleSnapshot(msg raft.ApplyMsg) {
 		kv.lastApplied = msg.SnapshotIndex
 		kv.readSnapshot(msg.Snapshot)
 	}
+	kv.mu.Unlock()
 }
 
 func (kv *KVServer) readSnapshot(data []byte) {
@@ -252,8 +267,9 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	// You may need initialization code here.
 	kv.data = make(map[string]string)
 	kv.replyCh = make(map[IndexAndTerm]chan CommonReply)
-	kv.cmd = make(map[ClientAndCommand]bool)
-	// kv.readSnapshot()
+	// kv.cmd = make(map[ClientAndCommand]bool)
+	kv.cmd = make(map[int64]int64)
+	kv.readSnapshot(kv.rf.GetSnapshot())
 	go kv.applier()
 
 	return kv

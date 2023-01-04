@@ -25,7 +25,7 @@ const NShards = 10
 type Config struct {
 	Num    int              // config number
 	Shards [NShards]int     // shard -> gid
-	Groups map[int][]string // gid -> servers[]
+	Groups map[int][]string // gid -> servers[] 非零的副本组的标识符 到 服务器列表的映射
 }
 
 const (

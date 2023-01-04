@@ -49,21 +49,21 @@ func (ck *Clerk) Get(key string) string {
 	reply := GetReply{}
 	serverId := nrand() % int64(len(ck.servers))
 	DPrintf("[Clerk.Get] [GetArgs: %v]\n", args)
-	for {
-		if ck.servers[serverId].Call("KVServer.Get", &args, &reply) {
-			DPrintf("[Clerk Get] [ClientId: %v, CommandId: %v, Receive from serverId: %v, reply: %+v]", args.ClientId, args.CommandId, serverId, reply)
+	for ; ; serverId = (serverId + 1) % int64(len(ck.servers)) {
+		ok := ck.servers[serverId].Call("KVServer.Get", &args, &reply)
+		DPrintf("[Clerk.Get] [serverId: %v, ok: %v]\n", serverId, ok)
+		if ok {
+			DPrintf("[Clerk.Get] [ClientId: %v, CommandId: %v, Receive from serverId: %v, reply: %+v]", args.ClientId, args.CommandId, serverId, reply)
 			switch reply.Err {
 			case OK:
 				return reply.Value
 			case ErrNoKey:
 				return ""
 			case ErrWrongLeader:
-				serverId = (serverId + 1) % int64(len(ck.servers))
+				continue
 			case ErrTimeOut:
-				serverId = (serverId + 1) % int64(len(ck.servers))
+				continue
 			}
-		} else {
-			serverId = (serverId + 1) % int64(len(ck.servers))
 		}
 	}
 }
@@ -89,22 +89,22 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	}
 	reply := PutAppendReply{}
 	serverId := nrand() % int64(len(ck.servers))
-	DPrintf("[Clerk.PutAppend] [PutAppendArgs: %v]\n", args)
-	for {
-		if ck.servers[serverId].Call("KVServer.PutAppend", &args, &reply) {
-			DPrintf("[Clerk PutAppend] [ClientId: %v, CommandId: %v, Receive from serverId: %v, reply: %+v]", args.ClientId, args.CommandId, serverId, reply)
+	// DPrintf("[Clerk.PutAppend] [PutAppendArgs: %+v]\n", args)
+	for ; ; serverId = (serverId + 1) % int64(len(ck.servers)) {
+		ok := ck.servers[serverId].Call("KVServer.PutAppend", &args, &reply)
+		DPrintf("[Clerk.PutAppend] [serverId: %v, ok: %v]\n", serverId, ok)
+		if ok {
+			DPrintf("[Clerk.PutAppend] [ClientId: %v, CommandId: %v, Receive from serverId: %v, reply: %+v]", args.ClientId, args.CommandId, serverId, reply)
 			switch reply.Err {
 			case OK:
 				return
 			case ErrNoKey:
 				return
 			case ErrWrongLeader:
-				serverId = (serverId + 1) % int64(len(ck.servers))
+				continue
 			case ErrTimeOut:
-				serverId = (serverId + 1) % int64(len(ck.servers))
+				continue
 			}
-		} else {
-			serverId = (serverId + 1) % int64(len(ck.servers))
 		}
 	}
 }
