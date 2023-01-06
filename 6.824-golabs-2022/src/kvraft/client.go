@@ -4,10 +4,11 @@ import "6.824/labrpc"
 import "crypto/rand"
 import "math/big"
 
-
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
+	CommandId int64
+	ClientId  int64
 }
 
 func nrand() int64 {
@@ -21,6 +22,8 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
 	// You'll have to add code here.
+	ck.CommandId = 0
+	ck.ClientId = nrand()
 	return ck
 }
 
@@ -37,9 +40,32 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 // arguments. and reply must be passed as a pointer.
 //
 func (ck *Clerk) Get(key string) string {
-
-	// You will have to modify this function.
-	return ""
+	ck.CommandId = ck.CommandId + 1
+	args := GetArgs{
+		Key:       key,
+		CommandId: ck.CommandId,
+		ClientId:  ck.ClientId,
+	}
+	reply := GetReply{}
+	serverId := nrand() % int64(len(ck.servers))
+	DPrintf("[Clerk.Get] [GetArgs: %v]\n", args)
+	for ; ; serverId = (serverId + 1) % int64(len(ck.servers)) {
+		ok := ck.servers[serverId].Call("KVServer.Get", &args, &reply)
+		DPrintf("[Clerk.Get] [serverId: %v, ok: %v]\n", serverId, ok)
+		if ok {
+			DPrintf("[Clerk.Get] [ClientId: %v, CommandId: %v, Receive from serverId: %v, reply: %+v]", args.ClientId, args.CommandId, serverId, reply)
+			switch reply.Err {
+			case OK:
+				return reply.Value
+			case ErrNoKey:
+				return ""
+			case ErrWrongLeader:
+				continue
+			case ErrTimeOut:
+				continue
+			}
+		}
+	}
 }
 
 //
@@ -53,7 +79,34 @@ func (ck *Clerk) Get(key string) string {
 // arguments. and reply must be passed as a pointer.
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
-	// You will have to modify this function.
+	ck.CommandId = ck.CommandId + 1
+	args := PutAppendArgs{
+		Key:       key,
+		Value:     value,
+		Op:        op,
+		CommandId: ck.CommandId,
+		ClientId:  ck.ClientId,
+	}
+	reply := PutAppendReply{}
+	serverId := nrand() % int64(len(ck.servers))
+	// DPrintf("[Clerk.PutAppend] [PutAppendArgs: %+v]\n", args)
+	for ; ; serverId = (serverId + 1) % int64(len(ck.servers)) {
+		ok := ck.servers[serverId].Call("KVServer.PutAppend", &args, &reply)
+		DPrintf("[Clerk.PutAppend] [serverId: %v, ok: %v]\n", serverId, ok)
+		if ok {
+			DPrintf("[Clerk.PutAppend] [ClientId: %v, CommandId: %v, Receive from serverId: %v, reply: %+v]", args.ClientId, args.CommandId, serverId, reply)
+			switch reply.Err {
+			case OK:
+				return
+			case ErrNoKey:
+				return
+			case ErrWrongLeader:
+				continue
+			case ErrTimeOut:
+				continue
+			}
+		}
+	}
 }
 
 func (ck *Clerk) Put(key string, value string) {

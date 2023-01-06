@@ -43,6 +43,7 @@ type ApplyMsg struct {
 	CommandValid bool
 	Command      interface{}
 	CommandIndex int
+	CommandTerm  int
 
 	// For 2D:
 	SnapshotValid bool
@@ -92,6 +93,14 @@ type Raft struct {
 	// 上一次快照信息
 	lastIncludedIndex int
 	lastIncludedTerm  int
+}
+
+func (rf *Raft) GetSnapshot() []byte {
+	return rf.persister.ReadSnapshot()
+}
+
+func (rf *Raft) GetRaftStateSize() int {
+	return rf.persister.RaftStateSize()
 }
 
 //
@@ -216,6 +225,10 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		rf.log = append(rf.log, logEntry)
 		DPrintf("%v start append log %v success!\n", rf.me, logEntry)
 		rf.persist()
+
+		// 立马进行一次心跳
+		go rf.BroadcastHeartBeat()
+
 		rf.mu.Unlock()
 	}
 	return index, term, isLeader
@@ -292,10 +305,11 @@ func (rf *Raft) BroadcastHeartBeat() {
 			}
 		}
 	}
+	rf.HeartBeatTimerReset()
 }
 
 // ResetTimer
-func (rf *Raft) ElectTimerReset() { // 150 ms - 300 ms 之间
+func (rf *Raft) ElectTimerReset() {
 	time := time.Duration(300+rand.Float64()*1000) * time.Millisecond
 	DPrintf("%v ElectTimer reset to %v\n", rf.me, time)
 	rf.ElectTimer.Reset(time)
@@ -316,14 +330,14 @@ func (rf *Raft) ticker() {
 		// time.Sleep().
 		select {
 		case <-rf.ElectTimer.C: // 选举超时
-			if rf.killed() {
+			if rf.killed() { // 可能阻塞前没有 killed，阻塞后被 killed 了。
 				break
 			}
 			rf.mu.Lock()
 			if rf.state != Leader {
 				rf.StartElection()
+				rf.ElectTimerReset()
 			}
-			rf.ElectTimerReset()
 			rf.mu.Unlock()
 		case <-rf.HeartBeatTimer.C: // 心跳检测
 			if rf.killed() {
@@ -333,7 +347,6 @@ func (rf *Raft) ticker() {
 			if rf.state == Leader {
 				go rf.BroadcastHeartBeat()
 			}
-			rf.HeartBeatTimerReset()
 			rf.mu.Unlock()
 		}
 	}
@@ -352,6 +365,7 @@ func (rf *Raft) applyToStateMachine() {
 			applyMsg = append(applyMsg, ApplyMsg{
 				Command:      rf.FindLog(i).Command,
 				CommandIndex: rf.FindLog(i).Index,
+				CommandTerm:  rf.FindLog(i).Term,
 				CommandValid: true,
 			})
 		}
