@@ -3,6 +3,7 @@ package shardctrler
 import (
 	"6.824/raft"
 	"log"
+	"sort"
 	"time"
 )
 import "6.824/labrpc"
@@ -72,13 +73,25 @@ func (sc *ShardCtrler) Query(args *QueryArgs, reply *QueryReply) {
 	reply.WrongLeader, reply.Err, reply.Config = sc.ProcessShardCtrlerCmd(cmd)
 }
 
+func (sc *ShardCtrler) IsDuplicate(cmd Op) bool {
+	if id, ok := sc.cmd[cmd.ClientId]; ok && id >= cmd.CommandId {
+		return true
+	}
+	return false
+}
+
 func (sc *ShardCtrler) ProcessShardCtrlerCmd(cmd Op) (bool, Err, Config) {
 	var err Err
 	var config Config
 	sc.mu.Lock()
-	defer sc.mu.Unlock()
+	DPrintf("[ShardCtrler.ProcessShardCtrlerCmd] [me: %v, cmd: %+v]\n", sc.me, cmd)
+	if cmd.Op != Query && sc.IsDuplicate(cmd) {
+		sc.mu.Unlock()
+		return false, OK, config
+	}
 	index, term, isleader := sc.rf.Start(cmd)
 	if !isleader {
+		sc.mu.Unlock()
 		return true, ErrWrongLeader, config
 	}
 	it := IndexAndTerm{
@@ -87,12 +100,13 @@ func (sc *ShardCtrler) ProcessShardCtrlerCmd(cmd Op) (bool, Err, Config) {
 	}
 	ch := make(chan CommonReply, 1)
 	sc.replyCh[it] = ch
+	sc.mu.Unlock()
+
 	select {
 	case replyMsg := <-ch:
 		err, config = replyMsg.Err, replyMsg.Config
 	case <-time.After(replyTimeOut):
 		err = ErrTimeOut
-
 	}
 
 	go func() {
@@ -104,6 +118,7 @@ func (sc *ShardCtrler) ProcessShardCtrlerCmd(cmd Op) (bool, Err, Config) {
 		}
 		close(ch)
 		delete(sc.replyCh, it)
+		DPrintf("[ShardCtrler.ProcessShardCtrlerCmd] [Close it: %+v, me: %v, err: %+v, config: %+v]\n", it, sc.me, err, config)
 	}()
 
 	return false, err, config
@@ -123,7 +138,7 @@ func (sc *ShardCtrler) applier() {
 func (sc *ShardCtrler) handleCommand(msg raft.ApplyMsg) {
 	op := msg.Command.(Op)
 	reply := CommonReply{}
-	DPrintf("[ShardCtrler.handleCommand] [msg:%+v] \n", msg)
+	// DPrintf("[ShardCtrler.handleCommand] [me: %v, msg:%+v] \n", sc.me, msg)
 	sc.mu.Lock()
 	if msg.CommandIndex <= sc.lastApplied {
 		sc.mu.Unlock()
@@ -149,6 +164,7 @@ func (sc *ShardCtrler) handleCommand(msg raft.ApplyMsg) {
 			config.Shards = sc.distributeShards(config.Groups)
 		}
 		sc.configs = append(sc.configs, config)
+		DPrintf("[ShardCtrler.Join] [me: %v, len(config.Groups) = %v]\n", sc.me, len(config.Groups))
 		reply.Err, reply.Config = OK, Config{}
 	case Leave: // 删除 group
 		config := Config{}
@@ -162,6 +178,8 @@ func (sc *ShardCtrler) handleCommand(msg raft.ApplyMsg) {
 			delete(config.Groups, gid)
 		}
 		config.Shards = sc.distributeShards(config.Groups)
+		sc.configs = append(sc.configs, config)
+		DPrintf("[ShardCtrler.Leave] [me: %v, len(config.Groups) = %v]\n", sc.me, len(config.Groups))
 		reply.Err, reply.Config = OK, Config{}
 	case Move: // 将指定的 shardId 交给 groupId
 		lastConfig := sc.configs[len(sc.configs)-1]
@@ -171,6 +189,7 @@ func (sc *ShardCtrler) handleCommand(msg raft.ApplyMsg) {
 			Groups: lastConfig.Groups,
 		}
 		config.Shards[op.Shard] = op.GID
+		sc.configs = append(sc.configs, config)
 		reply.Err, reply.Config = OK, Config{}
 	case Query: // 查询对应 num 的 config
 		if op.Num < 0 || op.Num >= len(sc.configs) {
@@ -182,7 +201,7 @@ func (sc *ShardCtrler) handleCommand(msg raft.ApplyMsg) {
 
 	if replyCh, ok := sc.replyCh[IndexAndTerm{msg.CommandIndex, msg.CommandTerm}]; ok {
 		replyCh <- reply
-		DPrintf("[kv.handleCommand] [msg: %+v is applied]\n", msg)
+		DPrintf("[ShardCtrler.handleCommand] [me: %v, msg: %+v is applied]\n", sc.me, msg)
 	}
 
 	sc.cmd[op.ClientId] = op.CommandId
@@ -200,6 +219,7 @@ func (sc *ShardCtrler) distributeShards(groups map[int][]string) (shards [NShard
 		gIds[i] = gId
 		i++
 	}
+	sort.Ints(gIds)
 	average := NShards / len(gIds)
 	if average == 0 {
 		for shard := range shards {
@@ -207,7 +227,7 @@ func (sc *ShardCtrler) distributeShards(groups map[int][]string) (shards [NShard
 		}
 	} else {
 		for shard := range shards {
-			if shards[shard]/average >= len(gIds) {
+			if shard/average >= len(gIds) {
 				shards[shard] = gIds[len(gIds)-1]
 			} else {
 				shards[shard] = gIds[shard/average]

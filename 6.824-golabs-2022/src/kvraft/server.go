@@ -71,7 +71,10 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 }
 
 func (kv *KVServer) IsDuplicate(cmd Op) bool {
-	return kv.cmd[cmd.ClientId] >= cmd.CommandId
+	if id, ok := kv.cmd[cmd.ClientId]; ok && id >= cmd.CommandId {
+		return true
+	}
+	return false
 }
 
 func (kv *KVServer) ProcessCommandHandler(cmd Op) (Err, string) {
