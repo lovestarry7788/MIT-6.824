@@ -40,6 +40,8 @@ type Clerk struct {
 	config   shardctrler.Config
 	make_end func(string) *labrpc.ClientEnd
 	// You will have to modify this struct.
+	CommandId int64
+	ClientId  int64
 }
 
 //
@@ -56,6 +58,9 @@ func MakeClerk(ctrlers []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 	ck.sm = shardctrler.MakeClerk(ctrlers)
 	ck.make_end = make_end
 	// You'll have to add code here.
+	ck.config = ck.sm.Query(-1)
+	ck.ClientId = nrand()
+	ck.CommandId = 0
 	return ck
 }
 
@@ -68,6 +73,8 @@ func MakeClerk(ctrlers []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 func (ck *Clerk) Get(key string) string {
 	args := GetArgs{}
 	args.Key = key
+	args.ClientId = ck.ClientId
+	args.CommandId = ck.CommandId
 
 	for {
 		shard := key2shard(key)
@@ -79,10 +86,14 @@ func (ck *Clerk) Get(key string) string {
 				var reply GetReply
 				ok := srv.Call("ShardKV.Get", &args, &reply)
 				if ok && (reply.Err == OK || reply.Err == ErrNoKey) {
+					ck.CommandId++
 					return reply.Value
 				}
 				if ok && (reply.Err == ErrWrongGroup) {
 					break
+				}
+				if !ok || reply.Err == ErrTimeOut || reply.Err == ErrWrongLeader {
+					continue
 				}
 				// ... not ok, or ErrWrongLeader
 			}
@@ -104,7 +115,8 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	args.Key = key
 	args.Value = value
 	args.Op = op
-
+	args.ClientId = ck.ClientId
+	args.CommandId = ck.CommandId
 
 	for {
 		shard := key2shard(key)
@@ -115,10 +127,14 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 				var reply PutAppendReply
 				ok := srv.Call("ShardKV.PutAppend", &args, &reply)
 				if ok && reply.Err == OK {
+					ck.CommandId++
 					return
 				}
 				if ok && reply.Err == ErrWrongGroup {
 					break
+				}
+				if !ok || reply.Err == ErrTimeOut || reply.Err == ErrWrongLeader {
+					continue
 				}
 				// ... not ok, or ErrWrongLeader
 			}
