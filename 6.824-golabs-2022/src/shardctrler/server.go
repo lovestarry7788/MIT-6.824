@@ -10,7 +10,7 @@ import "6.824/labrpc"
 import "sync"
 import "6.824/labgob"
 
-const Debug = false
+const Debug = true
 
 func DPrintf(format string, a ...interface{}) {
 	if Debug {
@@ -219,20 +219,26 @@ func (sc *ShardCtrler) distributeShards(groups map[int][]string) (shards [NShard
 		gIds[i] = gId
 		i++
 	}
-	sort.Ints(gIds)
-	average := NShards / len(gIds)
-	if average == 0 {
-		for shard := range shards {
-			shards[shard] = gIds[shard]
-		}
-	} else {
-		for shard := range shards {
-			if shard/average >= len(gIds) {
-				shards[shard] = gIds[len(gIds)-1]
-			} else {
-				shards[shard] = gIds[shard/average]
+	sort.Ints(gIds) // 需要特定顺序的遍历结果，需要先排序
+	DPrintf("[ShardCtrler.distributeShards] [me: %v, gIds: %v]\n", sc.me, gIds)
+	/*
+		average := NShards / len(gIds)
+		if average == 0 {
+			for shard := range shards {
+				shards[shard] = gIds[shard]
+			}
+		} else {
+			for shard := range shards {
+				if shard/average >= len(gIds) {
+					shards[shard] = gIds[len(gIds)-1]
+				} else {
+					shards[shard] = gIds[shard/average]
+				}
 			}
 		}
+	*/
+	for shard := range shards {
+		shards[shard] = gIds[shard%len(gIds)]
 	}
 	return
 }
