@@ -2,7 +2,7 @@ package shardkv
 
 import (
 	"6.824/labrpc"
-	"bytes"
+	"6.824/shardctrler"
 	"log"
 	"sync/atomic"
 	"time"
@@ -48,6 +48,12 @@ type ShardKV struct {
 	replyCh     map[IndexAndTerm]chan CommonReply
 	cmd         map[int64]int64 // 对于每个 Client 执行到哪个 Command
 	lastApplied int
+
+	sm               shardctrler.Clerk  // 获取配置的客户端
+	config           shardctrler.Config // 当前的配置
+	shardsAcceptable map[int]bool
+	needPullShards   map[int]int                       // shard -> configNum 表示我要拉取的分片在哪个 config
+	needSendShards   map[int]map[int]map[string]string // (configNum, shard) -> data 迁移时需要发送的数据
 }
 
 type IndexAndTerm struct {
@@ -57,7 +63,7 @@ type IndexAndTerm struct {
 
 func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
-	cmd := Op{Key: args.Key, Value: "", Op: "Get", ClientId: args.ClientId, CommandId: args.CommandId}
+	cmd := Op{Key: args.Key, Value: "", Op: Get, ClientId: args.ClientId, CommandId: args.CommandId}
 	reply.Err, reply.Value = kv.ProcessCommandHandler(cmd)
 }
 
@@ -135,84 +141,60 @@ func (kv *ShardKV) applier() {
 }
 
 func (kv *ShardKV) handleCommand(msg raft.ApplyMsg) {
-	op := msg.Command.(Op)
-	reply := CommonReply{}
-
 	kv.mu.Lock()
+	defer kv.mu.Unlock()
 	if msg.CommandIndex <= kv.lastApplied {
-		kv.mu.Unlock()
 		return
 	}
 
-	if op.Op != "Get" && kv.IsDuplicate(op) {
-		reply = CommonReply{OK, ""}
-	} else {
-		switch op.Op {
-		case "Get":
-			if value, ok := kv.data[op.Key]; ok {
-				reply = CommonReply{OK, value}
-			} else {
-				reply = CommonReply{ErrNoKey, ""}
+	switch msg.Command.(type) {
+	case ConfigUpdateCommand:
+		cmd := msg.Command.(ConfigUpdateCommand)
+		DPrintf("[ShardKV.ConfigUpdateCommand] [cmd : %+v]\n", cmd)
+		kv.updateConfig(cmd.config)
+	case ShardReplicationCommand:
+		cmd := msg.Command.(ShardReplicationCommand)
+		DPrintf("[ShardKV.ShardReplicationCommand] [cmd : %+v]\n", cmd)
+		kv.replicateShard(cmd)
+	default:
+		op := msg.Command.(Op)
+		reply := CommonReply{}
+
+		if op.Op != Get && kv.IsDuplicate(op) {
+			reply = CommonReply{OK, ""}
+		} else {
+			switch op.Op {
+			case Get:
+				if value, ok := kv.data[op.Key]; ok {
+					reply = CommonReply{OK, value}
+				} else {
+					reply = CommonReply{ErrNoKey, ""}
+				}
+			case Put:
+				kv.data[op.Key] = op.Value
+				reply = CommonReply{OK, ""}
+			case Append:
+				kv.data[op.Key] += op.Value
+				reply = CommonReply{OK, ""}
 			}
-		case "Put":
-			kv.data[op.Key] = op.Value
-			reply = CommonReply{OK, ""}
-		case "Append":
-			kv.data[op.Key] += op.Value
-			reply = CommonReply{OK, ""}
 		}
-	}
 
-	if replyCh, ok := kv.replyCh[IndexAndTerm{msg.CommandIndex, msg.CommandTerm}]; ok {
-		replyCh <- reply
-		DPrintf("[kv.handleCommand] [msg: %+v is applied]\n", msg)
-	}
-	/*
-		clientAndcommand := ClientAndCommand{
-			ClientId:  op.ClientId,
-			CommandId: op.CommandId,
+		if replyCh, ok := kv.replyCh[IndexAndTerm{msg.CommandIndex, msg.CommandTerm}]; ok {
+			replyCh <- reply
+			DPrintf("[kv.handleCommand] [msg: %+v is applied]\n", msg)
 		}
-		kv.cmd[clientAndcommand] = true
-	*/
-	kv.cmd[op.ClientId] = op.CommandId
-	kv.lastApplied = msg.CommandIndex
-
-	if kv.maxraftstate != -1 && (float32(kv.rf.GetRaftStateSize())/float32(kv.maxraftstate) > 0.9) {
-		// 创建快照
-		DPrintf("[handleCommand] [kv.rf.GetRaftStateSize: %v, kv.maxraftstate: %v]\n", kv.rf.GetRaftStateSize(), kv.maxraftstate)
-		w := new(bytes.Buffer)
-		e := labgob.NewEncoder(w)
-		e.Encode(kv.data)
-		e.Encode(kv.cmd)
-		Snapshot := w.Bytes()
-		go kv.rf.Snapshot(msg.CommandIndex, Snapshot)
-		DPrintf("[handleCommand] [me: %v, Create snapshot success!]\n", kv.me)
+		kv.cmd[op.ClientId] = op.CommandId
+		kv.lastApplied = msg.CommandIndex
 	}
 
-	kv.mu.Unlock()
+	if kv.needSnapshot() {
+		kv.createSnapshot(msg.CommandIndex)
+	}
 }
 
-func (kv *ShardKV) handleSnapshot(msg raft.ApplyMsg) {
-	kv.mu.Lock()
-	if msg.SnapshotIndex <= kv.lastApplied {
-		kv.mu.Unlock()
-		return
-	}
-	if kv.rf.CondInstallSnapshot(msg.SnapshotTerm, msg.SnapshotIndex, msg.Snapshot) {
-		kv.lastApplied = msg.SnapshotIndex
-		kv.readSnapshot(msg.Snapshot)
-	}
-	kv.mu.Unlock()
-}
-
-func (kv *ShardKV) readSnapshot(data []byte) {
-	if data == nil || len(data) < 1 { // bootstrap without any state?
-		return
-	}
-	r := bytes.NewBuffer(data)
-	d := labgob.NewDecoder(r)
-	d.Decode(&kv.data)
-	d.Decode(&kv.cmd)
+func (kv *ShardKV) getNextConfig(Num int) (shardctrler.Config, bool) {
+	config := kv.sm.Query(Num + 1)
+	return config, config.Num == Num+1
 }
 
 //
@@ -285,6 +267,58 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.cmd = make(map[int64]int64)
 	// kv.readSnapshot(kv.rf.GetSnapshot())
 	go kv.applier()
+	go kv.Ticker(kv.ConfigureAction, ConfigureDuration)
+	go kv.Ticker(kv.MigrationAction, MigrationDuration)
+	go kv.Ticker(kv.GcAction, GcDuration)
 
 	return kv
+}
+
+func (kv *ShardKV) Ticker(fn func(), timeout time.Duration) {
+	for !kv.killed() {
+		if _, isLeader := kv.rf.GetState(); isLeader {
+			fn()
+		}
+		time.Sleep(timeout)
+	}
+}
+
+func (kv *ShardKV) ConfigureAction() {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	if config, ok := kv.getNextConfig(kv.config.Num); ok {
+		kv.rf.Start()
+	}
+}
+
+func (kv *ShardKV) MigrationAction() {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	wg := sync.WaitGroup{}
+	for shard, configNum := range kv.needPullShards {
+		config := kv.sm.Query(configNum)
+		wg.Add(1)
+		go func(config shardctrler.Config, shard int) {
+			defer wg.Done()
+			_, isLeader := kv.rf.GetState()
+			if !isLeader {
+				return
+			}
+			gId := config.Shards[shard]
+			args := ShardPullArgs{shard, config.Num}
+			for _, server := range config.Groups[gId] {
+				reply := ShardPullReply{}
+				ok := kv.make_end(server).Call("ShardKV.ShardPull", &args, &reply)
+				if ok && reply.Err == OK {
+					kv.rf.Start(ShardReplicationCommand{Data: reply.Data, Shard: reply.Shard, Num: reply.Num})
+					break
+				}
+			}
+		}(config, shard)
+	}
+	wg.Wait()
+}
+
+func (kv *ShardKV) GcAction() {
+
 }

@@ -1,6 +1,9 @@
 package shardkv
 
-import "time"
+import (
+	"6.824/shardctrler"
+	"time"
+)
 
 //
 // Sharded key/value server.
@@ -12,12 +15,21 @@ import "time"
 //
 
 const (
-	OK             = "OK"
-	ErrNoKey       = "ErrNoKey"
-	ErrWrongGroup  = "ErrWrongGroup"
-	ErrWrongLeader = "ErrWrongLeader"
-	ErrTimeOut     = "ErrTimeOut"
-	replyTimeOut   = time.Duration(500) * time.Millisecond
+	OK                = "OK"
+	ErrNoKey          = "ErrNoKey"
+	ErrWrongGroup     = "ErrWrongGroup"
+	ErrWrongLeader    = "ErrWrongLeader"
+	ErrTimeOut        = "ErrTimeOut"
+	replyTimeOut      = time.Duration(500) * time.Millisecond
+	ConfigureDuration = time.Duration(50) * time.Millisecond
+	MigrationDuration = time.Duration(30) * time.Millisecond
+	GcDuration        = time.Duration(50) * time.Millisecond
+)
+
+const ( // kvRaft 的状态
+	Get    = "Get"
+	Put    = "Put"
+	Append = "Append"
 )
 
 type Err string
@@ -54,4 +66,27 @@ type GetReply struct {
 type CommonReply struct {
 	Err   Err
 	Value string
+}
+
+type ConfigUpdateCommand struct {
+	config shardctrler.Config
+}
+
+type ShardPullArgs struct {
+	Shard int
+	Num   int
+}
+
+type ShardPullReply struct {
+	Shard int
+	Num   int
+	Data  map[string]string
+
+	Err Err
+}
+
+type ShardReplicationCommand struct {
+	Shard int
+	Num   int
+	Data  map[string]string
 }
