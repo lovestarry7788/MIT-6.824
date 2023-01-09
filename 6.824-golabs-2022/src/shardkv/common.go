@@ -78,11 +78,27 @@ type ShardPullArgs struct {
 }
 
 type ShardPullReply struct {
+	Data map[string]string
+	Err  Err
+}
+
+type ShardGcArgs struct {
 	Shard int
 	Num   int
-	Data  map[string]string
+}
 
+type ShardGcReply struct {
 	Err Err
+}
+
+type GcSuccessCommand struct {
+	Shard int
+	Num   int
+}
+
+type GcCommand struct {
+	Shard int
+	Num   int
 }
 
 type ShardReplicationCommand struct {

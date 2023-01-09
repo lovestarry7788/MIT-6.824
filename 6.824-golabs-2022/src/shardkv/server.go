@@ -54,6 +54,7 @@ type ShardKV struct {
 	shardsAcceptable map[int]bool
 	needPullShards   map[int]int                       // shard -> configNum 表示我要拉取的分片在哪个 config
 	needSendShards   map[int]map[int]map[string]string // (configNum, shard) -> data 迁移时需要发送的数据
+	gcList           map[int]int                       // shard -> configNum 表示我要回收的分片是属于哪个 config
 }
 
 type IndexAndTerm struct {
@@ -78,6 +79,17 @@ func (kv *ShardKV) IsDuplicate(cmd Op) bool {
 		return true
 	}
 	return false
+}
+
+func (kv *ShardKV) CloseChannel(it IndexAndTerm) {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	ch, ok := kv.replyCh[it]
+	if !ok {
+		return
+	}
+	close(ch)
+	delete(kv.replyCh, it)
 }
 
 func (kv *ShardKV) ProcessCommandHandler(cmd Op) (Err, string) {
@@ -112,16 +124,7 @@ func (kv *ShardKV) ProcessCommandHandler(cmd Op) (Err, string) {
 		err, value = ErrTimeOut, ""
 	}
 
-	go func() { // 关闭管道
-		kv.mu.Lock()
-		defer kv.mu.Unlock()
-		ch, ok := kv.replyCh[it]
-		if !ok {
-			return
-		}
-		close(ch)
-		delete(kv.replyCh, it)
-	}()
+	go kv.CloseChannel(it)
 
 	return err, value
 }
@@ -156,6 +159,21 @@ func (kv *ShardKV) handleCommand(msg raft.ApplyMsg) {
 		cmd := msg.Command.(ShardReplicationCommand)
 		DPrintf("[ShardKV.ShardReplicationCommand] [cmd : %+v]\n", cmd)
 		kv.replicateShard(cmd)
+	case GcCommand:
+		cmd := msg.Command.(GcCommand)
+		DPrintf("[ShardKV.GcCommand] [cmd : %+v]\n", cmd)
+		if _, ok := kv.needSendShards[cmd.Num][cmd.Shard]; ok {
+			delete(kv.needSendShards[cmd.Num], cmd.Shard)
+		}
+		if replyCh, ok := kv.replyCh[IndexAndTerm{msg.CommandIndex, msg.CommandTerm}]; ok {
+			replyCh <- CommonReply{Err: OK}
+		}
+	case GcSuccessCommand:
+		cmd := msg.Command.(GcSuccessCommand)
+		DPrintf("[ShardKV.GcSuccessCommand] [cmd : %+v]\n", cmd)
+		if configNum, ok := kv.gcList[cmd.Shard]; ok && configNum == cmd.Num {
+			delete(kv.gcList, cmd.Shard)
+		}
 	default:
 		op := msg.Command.(Op)
 		reply := CommonReply{}
@@ -190,11 +208,6 @@ func (kv *ShardKV) handleCommand(msg raft.ApplyMsg) {
 	if kv.needSnapshot() {
 		kv.createSnapshot(msg.CommandIndex)
 	}
-}
-
-func (kv *ShardKV) getNextConfig(Num int) (shardctrler.Config, bool) {
-	config := kv.sm.Query(Num + 1)
-	return config, config.Num == Num+1
 }
 
 //
@@ -283,11 +296,20 @@ func (kv *ShardKV) Ticker(fn func(), timeout time.Duration) {
 	}
 }
 
+func (kv *ShardKV) getNextConfig(Num int) (shardctrler.Config, bool) {
+	config := kv.sm.Query(Num + 1)
+	return config, config.Num == Num+1
+}
+
 func (kv *ShardKV) ConfigureAction() {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
+	// 还有未拉取完的 shards
+	if len(kv.needPullShards) > 0 {
+		return
+	}
 	if config, ok := kv.getNextConfig(kv.config.Num); ok {
-		kv.rf.Start()
+		kv.rf.Start(ConfigUpdateCommand{config})
 	}
 }
 
@@ -296,8 +318,8 @@ func (kv *ShardKV) MigrationAction() {
 	defer kv.mu.Unlock()
 	wg := sync.WaitGroup{}
 	for shard, configNum := range kv.needPullShards {
-		config := kv.sm.Query(configNum)
 		wg.Add(1)
+		config := kv.sm.Query(configNum)
 		go func(config shardctrler.Config, shard int) {
 			defer wg.Done()
 			_, isLeader := kv.rf.GetState()
@@ -310,7 +332,7 @@ func (kv *ShardKV) MigrationAction() {
 				reply := ShardPullReply{}
 				ok := kv.make_end(server).Call("ShardKV.ShardPull", &args, &reply)
 				if ok && reply.Err == OK {
-					kv.rf.Start(ShardReplicationCommand{Data: reply.Data, Shard: reply.Shard, Num: reply.Num})
+					kv.rf.Start(ShardReplicationCommand{Data: reply.Data, Shard: shard, Num: config.Num})
 					break
 				}
 			}
@@ -320,5 +342,29 @@ func (kv *ShardKV) MigrationAction() {
 }
 
 func (kv *ShardKV) GcAction() {
-
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	wg := sync.WaitGroup{}
+	for shard, configNum := range kv.gcList {
+		wg.Add(1)
+		config := kv.sm.Query(configNum)
+		go func(config shardctrler.Config, shard int) {
+			defer wg.Done()
+			_, isLeader := kv.rf.GetState()
+			if !isLeader {
+				return
+			}
+			gId := config.Shards[shard]
+			args := ShardGcArgs{Shard: shard, Num: config.Num}
+			for _, server := range config.Groups[gId] {
+				reply := ShardGcReply{}
+				ok := kv.make_end(server).Call("ShardKV.ShardGc", args, reply) // 删除 PullSend
+				if ok && reply.Err == OK {
+					kv.rf.Start(GcSuccessCommand{Shard: shard, Num: config.Num}) // 删除 gcList
+					break
+				}
+			}
+		}(config, shard)
+	}
+	wg.Wait()
 }

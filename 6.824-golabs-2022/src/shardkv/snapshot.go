@@ -16,6 +16,12 @@ func (kv *ShardKV) createSnapshot(CommandIndex int) {
 	e := labgob.NewEncoder(w)
 	e.Encode(kv.data)
 	e.Encode(kv.cmd)
+	e.Encode(kv.config)
+	e.Encode(kv.shardsAcceptable)
+	e.Encode(kv.needPullShards)
+	e.Encode(kv.needSendShards)
+	e.Encode(kv.gcList)
+
 	Snapshot := w.Bytes()
 	go kv.rf.Snapshot(CommandIndex, Snapshot)
 	DPrintf("[handleCommand] [me: %v, Create snapshot success!]\n", kv.me)
@@ -29,6 +35,11 @@ func (kv *ShardKV) readSnapshot(data []byte) {
 	d := labgob.NewDecoder(r)
 	d.Decode(&kv.data)
 	d.Decode(&kv.cmd)
+	d.Decode(&kv.config)
+	d.Decode(&kv.shardsAcceptable)
+	d.Decode(&kv.needPullShards)
+	d.Decode(&kv.needSendShards)
+	d.Decode(&kv.gcList)
 }
 
 func (kv *ShardKV) handleSnapshot(msg raft.ApplyMsg) {

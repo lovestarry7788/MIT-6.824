@@ -3,30 +3,49 @@ package shardkv
 import (
 	"6.824/shardctrler"
 	"github.com/mohae/deepcopy"
+	"time"
 )
 
 func (kv *ShardKV) ShardPull(args ShardPullArgs, reply ShardPullReply) {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+
 	_, isLeader := kv.rf.GetState()
 	if !isLeader {
 		reply.Err = ErrWrongLeader
 		return
 	}
-	kv.mu.Lock()
-	defer kv.mu.Unlock()
+
 	reply = ShardPullReply{
-		Shard: args.Shard,
-		Num:   args.Num,
-		Data:  deepcopy.Copy(kv.needSendShards[args.Num][args.Shard]).(map[string]string),
-		Err:   OK,
+		Data: deepcopy.Copy(kv.needSendShards[args.Num][args.Shard]).(map[string]string),
+		Err:  OK,
 	}
 }
 
-func (kv *ShardKV) replicateShard(cmd ShardReplicationCommand) {
-	if _, ok := kv.needPullShards[cmd.Shard]; !ok {
+func (kv *ShardKV) ShardGc(args ShardGcArgs, reply ShardGcReply) {
+	kv.mu.Lock()
+	_, isLeader := kv.rf.GetState()
+	if !isLeader {
+		reply.Err = ErrWrongLeader
 		return
 	}
-	delete(kv.needPullShards, cmd.Shard)
-
+	if _, ok := kv.needSendShards[args.Num][args.Shard]; !ok {
+		reply.Err = OK
+		return
+	}
+	cmd := GcCommand{Shard: args.Shard, Num: args.Num}
+	index, term, isLeader := kv.rf.Start(cmd)
+	ch := make(chan CommonReply, 1)
+	it := IndexAndTerm{Index: index, Term: term}
+	kv.replyCh[it] = ch
+	kv.mu.Unlock()
+	select {
+	case replyMsg := <-ch:
+		reply.Err = replyMsg.Err
+	case <-time.After(replyTimeOut):
+		reply.Err = ErrTimeOut
+	}
+	go kv.CloseChannel(it)
 }
 
 func (kv *ShardKV) updateConfig(config shardctrler.Config) {
@@ -67,5 +86,20 @@ func (kv *ShardKV) updateConfig(config shardctrler.Config) {
 				shardData[shard] = data
 			}
 		}
+	}
+}
+
+func (kv *ShardKV) replicateShard(cmd ShardReplicationCommand) {
+	if _, ok := kv.needPullShards[cmd.Shard]; !ok {
+		return
+	}
+	// 删除需要拉取的 shard
+	delete(kv.needPullShards, cmd.Shard)
+	if _, ok := kv.shardsAcceptable[cmd.Shard]; !ok {
+		for k, v := range cmd.Data {
+			kv.data[k] = v
+		}
+		kv.shardsAcceptable[cmd.Shard] = true
+		kv.gcList[cmd.Shard] = cmd.Num
 	}
 }
