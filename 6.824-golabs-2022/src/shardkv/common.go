@@ -15,15 +15,16 @@ import (
 //
 
 const (
-	OK                = "OK"
-	ErrNoKey          = "ErrNoKey"
-	ErrWrongGroup     = "ErrWrongGroup"
-	ErrWrongLeader    = "ErrWrongLeader"
-	ErrTimeOut        = "ErrTimeOut"
-	replyTimeOut      = time.Duration(500) * time.Millisecond
-	ConfigureDuration = time.Duration(50) * time.Millisecond
-	MigrationDuration = time.Duration(30) * time.Millisecond
-	GcDuration        = time.Duration(50) * time.Millisecond
+	OK                 = "OK"
+	ErrNoKey           = "ErrNoKey"
+	ErrWrongGroup      = "ErrWrongGroup"
+	ErrWrongLeader     = "ErrWrongLeader"
+	ErrTimeOut         = "ErrTimeOut"
+	ErrServerNotUpdate = "ErrServerNotUpdate"
+	replyTimeOut       = time.Duration(500) * time.Millisecond
+	ConfigureDuration  = time.Duration(50) * time.Millisecond
+	MigrationDuration  = time.Duration(30) * time.Millisecond
+	GcDuration         = time.Duration(50) * time.Millisecond
 )
 
 const ( // kvRaft 的状态

@@ -49,7 +49,7 @@ type ShardKV struct {
 	cmd         map[int64]int64 // 对于每个 Client 执行到哪个 Command
 	lastApplied int
 
-	sm               shardctrler.Clerk  // 获取配置的客户端
+	sm               *shardctrler.Clerk // 获取配置的客户端
 	config           shardctrler.Config // 当前的配置
 	shardsAcceptable map[int]bool
 	needPullShards   map[int]int                       // shard -> configNum 表示我要拉取的分片在哪个 config
@@ -75,7 +75,7 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 }
 
 func (kv *ShardKV) IsDuplicate(cmd Op) bool {
-	if id, ok := kv.cmd[cmd.ClientId]; ok && id >= cmd.CommandId {
+	if CommandId, ok := kv.cmd[cmd.ClientId]; ok && CommandId >= cmd.CommandId {
 		return true
 	}
 	return false
@@ -278,7 +278,15 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.data = make(map[string]string)
 	kv.replyCh = make(map[IndexAndTerm]chan CommonReply)
 	kv.cmd = make(map[int64]int64)
-	// kv.readSnapshot(kv.rf.GetSnapshot())
+
+	kv.sm = shardctrler.MakeClerk(kv.ctrlers)
+	kv.shardsAcceptable = make(map[int]bool)
+	kv.needPullShards = make(map[int]int)
+	kv.needSendShards = make(map[int]map[int]map[string]string)
+	kv.gcList = make(map[int]int)
+
+	kv.readSnapshot(kv.rf.GetSnapshot())
+
 	go kv.applier()
 	go kv.Ticker(kv.ConfigureAction, ConfigureDuration)
 	go kv.Ticker(kv.MigrationAction, MigrationDuration)
@@ -318,8 +326,8 @@ func (kv *ShardKV) MigrationAction() {
 	defer kv.mu.Unlock()
 	wg := sync.WaitGroup{}
 	for shard, configNum := range kv.needPullShards {
-		wg.Add(1)
 		config := kv.sm.Query(configNum)
+		wg.Add(1)
 		go func(config shardctrler.Config, shard int) {
 			defer wg.Done()
 			_, isLeader := kv.rf.GetState()
@@ -330,7 +338,7 @@ func (kv *ShardKV) MigrationAction() {
 			args := ShardPullArgs{shard, config.Num}
 			for _, server := range config.Groups[gId] {
 				reply := ShardPullReply{}
-				ok := kv.make_end(server).Call("ShardKV.ShardPull", &args, &reply)
+				ok := kv.make_end(server).Call("ShardKV.ShardPull", &args, &reply) // 之前的 group 里拉取分片。
 				if ok && reply.Err == OK {
 					kv.rf.Start(ShardReplicationCommand{Data: reply.Data, Shard: shard, Num: config.Num})
 					break
