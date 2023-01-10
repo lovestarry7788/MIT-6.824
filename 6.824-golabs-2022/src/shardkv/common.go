@@ -70,7 +70,7 @@ type CommonReply struct {
 }
 
 type ConfigUpdateCommand struct {
-	config shardctrler.Config
+	Config shardctrler.Config
 }
 
 type ShardPullArgs struct {
@@ -80,6 +80,7 @@ type ShardPullArgs struct {
 
 type ShardPullReply struct {
 	Data map[string]string
+	Cmd  map[int64]int64
 	Err  Err
 }
 
@@ -105,5 +106,6 @@ type GcCommand struct {
 type ShardReplicationCommand struct {
 	Shard int
 	Num   int
+	Cmd   map[int64]int64
 	Data  map[string]string
 }

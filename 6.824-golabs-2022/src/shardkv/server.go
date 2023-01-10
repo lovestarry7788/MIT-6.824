@@ -11,7 +11,7 @@ import "6.824/raft"
 import "sync"
 import "6.824/labgob"
 
-const Debug = false
+const Debug = true
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug {
@@ -49,9 +49,9 @@ type ShardKV struct {
 	cmd         map[int64]int64 // 对于每个 Client 执行到哪个 Command
 	lastApplied int
 
-	sm               *shardctrler.Clerk // 获取配置的客户端
-	config           shardctrler.Config // 当前的配置
-	shardsAcceptable map[int]bool
+	sm               *shardctrler.Clerk                // 获取配置的客户端
+	config           shardctrler.Config                // 当前的配置
+	shardsAcceptable map[int]bool                      // shard -> bool
 	needPullShards   map[int]int                       // shard -> configNum 表示我要拉取的分片在哪个 config
 	needSendShards   map[int]map[int]map[string]string // (configNum, shard) -> data 迁移时需要发送的数据
 	gcList           map[int]int                       // shard -> configNum 表示我要回收的分片是属于哪个 config
@@ -97,6 +97,10 @@ func (kv *ShardKV) ProcessCommandHandler(cmd Op) (Err, string) {
 	var value string
 	DPrintf("[Server.ProcessCommandHandler] [me: %v, cmd: %+v]\n", kv.me, cmd)
 	kv.mu.Lock()
+	if _, ok := kv.shardsAcceptable[key2shard(cmd.Key)]; !ok {
+		kv.mu.Unlock()
+		return ErrWrongGroup, ""
+	}
 	if cmd.Op != "Get" && kv.IsDuplicate(cmd) {
 		kv.mu.Unlock()
 		return OK, ""
@@ -154,7 +158,7 @@ func (kv *ShardKV) handleCommand(msg raft.ApplyMsg) {
 	case ConfigUpdateCommand:
 		cmd := msg.Command.(ConfigUpdateCommand)
 		DPrintf("[ShardKV.ConfigUpdateCommand] [cmd : %+v]\n", cmd)
-		kv.updateConfig(cmd.config)
+		kv.updateConfig(cmd.Config)
 	case ShardReplicationCommand:
 		cmd := msg.Command.(ShardReplicationCommand)
 		DPrintf("[ShardKV.ShardReplicationCommand] [cmd : %+v]\n", cmd)
@@ -177,26 +181,28 @@ func (kv *ShardKV) handleCommand(msg raft.ApplyMsg) {
 	default:
 		op := msg.Command.(Op)
 		reply := CommonReply{}
-
-		if op.Op != Get && kv.IsDuplicate(op) {
-			reply = CommonReply{OK, ""}
+		if _, ok := kv.shardsAcceptable[key2shard(op.Key)]; !ok {
+			reply = CommonReply{ErrWrongGroup, ""}
 		} else {
-			switch op.Op {
-			case Get:
-				if value, ok := kv.data[op.Key]; ok {
-					reply = CommonReply{OK, value}
-				} else {
-					reply = CommonReply{ErrNoKey, ""}
+			if op.Op != Get && kv.IsDuplicate(op) {
+				reply = CommonReply{OK, ""}
+			} else {
+				switch op.Op {
+				case Get:
+					if value, ok := kv.data[op.Key]; ok {
+						reply = CommonReply{OK, value}
+					} else {
+						reply = CommonReply{ErrNoKey, ""}
+					}
+				case Put:
+					kv.data[op.Key] = op.Value
+					reply = CommonReply{OK, ""}
+				case Append:
+					kv.data[op.Key] += op.Value
+					reply = CommonReply{OK, ""}
 				}
-			case Put:
-				kv.data[op.Key] = op.Value
-				reply = CommonReply{OK, ""}
-			case Append:
-				kv.data[op.Key] += op.Value
-				reply = CommonReply{OK, ""}
 			}
 		}
-
 		if replyCh, ok := kv.replyCh[IndexAndTerm{msg.CommandIndex, msg.CommandTerm}]; ok {
 			replyCh <- reply
 			DPrintf("[kv.handleCommand] [msg: %+v is applied]\n", msg)
@@ -259,6 +265,10 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	// call labgob.Register on structures you want
 	// Go's RPC library to marshall/unmarshall.
 	labgob.Register(Op{})
+	labgob.Register(ConfigUpdateCommand{})
+	labgob.Register(ShardReplicationCommand{})
+	labgob.Register(GcCommand{})
+	labgob.Register(GcSuccessCommand{})
 
 	kv := new(ShardKV)
 	kv.me = me
@@ -316,16 +326,19 @@ func (kv *ShardKV) ConfigureAction() {
 	if len(kv.needPullShards) > 0 {
 		return
 	}
+	DPrintf("[ConfigureAction] [me: %+v, kv.needPullShards: %+v]\n", kv.me, kv.needPullShards)
 	if config, ok := kv.getNextConfig(kv.config.Num); ok {
 		kv.rf.Start(ConfigUpdateCommand{config})
+		DPrintf("[ConfigureAction] [ConfigUpdateCommand: %+v]\n", config)
 	}
 }
 
 func (kv *ShardKV) MigrationAction() {
 	kv.mu.Lock()
-	defer kv.mu.Unlock()
 	wg := sync.WaitGroup{}
+	DPrintf("[MigrationAction] [me: %v, kv.needPullShards: %+v]\n", kv.me, kv.needPullShards)
 	for shard, configNum := range kv.needPullShards {
+		// DPrintf("[MigrationAction] [me: %v, shard: %v, configNum: %v]\n", kv.me, shard, configNum)
 		config := kv.sm.Query(configNum)
 		wg.Add(1)
 		go func(config shardctrler.Config, shard int) {
@@ -339,21 +352,24 @@ func (kv *ShardKV) MigrationAction() {
 			for _, server := range config.Groups[gId] {
 				reply := ShardPullReply{}
 				ok := kv.make_end(server).Call("ShardKV.ShardPull", &args, &reply) // 之前的 group 里拉取分片。
+				DPrintf("[MigrationAction] [me: %v, args: %+v, ShardPull Data: %+v]\n", kv.me, args, reply.Data)
 				if ok && reply.Err == OK {
-					kv.rf.Start(ShardReplicationCommand{Data: reply.Data, Shard: shard, Num: config.Num})
+					kv.rf.Start(ShardReplicationCommand{Data: reply.Data, Cmd: reply.Cmd, Shard: shard, Num: config.Num})
 					break
 				}
 			}
 		}(config, shard)
 	}
+	kv.mu.Unlock()
 	wg.Wait()
 }
 
 func (kv *ShardKV) GcAction() {
 	kv.mu.Lock()
-	defer kv.mu.Unlock()
 	wg := sync.WaitGroup{}
+	DPrintf("[GcAction] [me: %v, kv.gcList: %+v]\n", kv.me, kv.gcList)
 	for shard, configNum := range kv.gcList {
+		// DPrintf("[MigrationAction] [me: %v, shard: %v, configNum: %v]\n", kv.me, shard, configNum)
 		wg.Add(1)
 		config := kv.sm.Query(configNum)
 		go func(config shardctrler.Config, shard int) {
@@ -366,7 +382,7 @@ func (kv *ShardKV) GcAction() {
 			args := ShardGcArgs{Shard: shard, Num: config.Num}
 			for _, server := range config.Groups[gId] {
 				reply := ShardGcReply{}
-				ok := kv.make_end(server).Call("ShardKV.ShardGc", args, reply) // 删除 PullSend
+				ok := kv.make_end(server).Call("ShardKV.ShardGc", &args, &reply) // 删除 PullSend
 				if ok && reply.Err == OK {
 					kv.rf.Start(GcSuccessCommand{Shard: shard, Num: config.Num}) // 删除 gcList
 					break
@@ -374,5 +390,6 @@ func (kv *ShardKV) GcAction() {
 			}
 		}(config, shard)
 	}
+	kv.mu.Unlock()
 	wg.Wait()
 }

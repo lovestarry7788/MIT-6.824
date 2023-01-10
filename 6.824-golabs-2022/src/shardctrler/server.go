@@ -10,7 +10,7 @@ import "6.824/labrpc"
 import "sync"
 import "6.824/labgob"
 
-const Debug = true
+const Debug = false
 
 func DPrintf(format string, a ...interface{}) {
 	if Debug {

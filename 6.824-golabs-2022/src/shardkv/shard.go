@@ -55,28 +55,23 @@ func (kv *ShardKV) updateConfig(config shardctrler.Config) {
 MigrationAction:
 1. 轮询 needPullShards，拉取分片，并进行复制。
 */
-func (kv *ShardKV) ShardPull(args ShardPullArgs, reply ShardPullReply) {
+func (kv *ShardKV) ShardPull(args *ShardPullArgs, reply *ShardPullReply) {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
-
 	_, isLeader := kv.rf.GetState()
 	if !isLeader {
 		reply.Err = ErrWrongLeader
 		return
 	}
-
 	if args.Num >= kv.config.Num {
 		reply.Err = ErrServerNotUpdate
 		return
 	}
 
-	reply = ShardPullReply{
-		Data: deepcopy.Copy(kv.needSendShards[args.Num][args.Shard]).(map[string]string),
-		Err:  OK,
-	}
+	reply.Data, reply.Cmd, reply.Err = deepcopy.Copy(kv.needSendShards[args.Num][args.Shard]).(map[string]string), deepcopy.Copy(kv.cmd).(map[int64]int64), OK
 }
 
-func (kv *ShardKV) ShardGc(args ShardGcArgs, reply ShardGcReply) {
+func (kv *ShardKV) ShardGc(args *ShardGcArgs, reply *ShardGcReply) {
 	kv.mu.Lock()
 	_, isLeader := kv.rf.GetState()
 	if !isLeader {
@@ -111,6 +106,13 @@ func (kv *ShardKV) replicateShard(cmd ShardReplicationCommand) {
 	if _, ok := kv.shardsAcceptable[cmd.Shard]; !ok {
 		for k, v := range cmd.Data {
 			kv.data[k] = v
+		}
+		for client, command2 := range cmd.Cmd {
+			if command, ok := kv.cmd[client]; !ok {
+				kv.cmd[client] = command2
+			} else if command2 >= command {
+				kv.cmd[client] = command2
+			}
 		}
 		kv.shardsAcceptable[cmd.Shard] = true
 		kv.gcList[cmd.Shard] = cmd.Num
