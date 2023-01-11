@@ -10,7 +10,7 @@ import "6.824/labrpc"
 import "sync"
 import "6.824/labgob"
 
-const Debug = true
+const Debug = false
 
 func DPrintf(format string, a ...interface{}) {
 	if Debug {
@@ -94,11 +94,13 @@ func (sc *ShardCtrler) ProcessShardCtrlerCmd(cmd Op) (bool, Err, Config) {
 		sc.mu.Unlock()
 		return true, ErrWrongLeader, config
 	}
+	sc.mu.Unlock()
 	it := IndexAndTerm{
 		Index: index,
 		Term:  term,
 	}
 	ch := make(chan CommonReply, 1)
+	sc.mu.Lock()
 	sc.replyCh[it] = ch
 	sc.mu.Unlock()
 
