@@ -81,6 +81,7 @@ func (ck *Clerk) Get(key string) string {
 		gid := ck.config.Shards[shard]
 		if servers, ok := ck.config.Groups[gid]; ok {
 			// try each server for the shard.
+			DPrintf("[Clerk.Get] [ck.config.Num: %+v]\n", ck.config.Num)
 			for si := 0; si < len(servers); si++ {
 				srv := ck.make_end(servers[si])
 				var reply GetReply
@@ -122,6 +123,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		shard := key2shard(key)
 		gid := ck.config.Shards[shard]
 		if servers, ok := ck.config.Groups[gid]; ok {
+			DPrintf("[Clerk.PutAppend] [ck.config.Num: %+v]\n", ck.config.Num)
 			for si := 0; si < len(servers); si++ {
 				srv := ck.make_end(servers[si])
 				var reply PutAppendReply

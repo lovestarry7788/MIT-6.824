@@ -11,7 +11,7 @@ import "6.824/raft"
 import "sync"
 import "6.824/labgob"
 
-const Debug = true
+const Debug = false
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug {
@@ -95,21 +95,29 @@ func (kv *ShardKV) CloseChannel(it IndexAndTerm) {
 func (kv *ShardKV) ProcessCommandHandler(cmd Op) (Err, string) {
 	var err Err
 	var value string
-	DPrintf("[Server.ProcessCommandHandler] [me: %v, cmd: %+v]\n", kv.me, cmd)
 	kv.mu.Lock()
+	defer func() {
+		DPrintf("[Server.ProcessCommandHandler] [err: %v, value: %v]\n", err, value)
+	}()
+	DPrintf("[Server.ProcessCommandHandler] [me: %v, shardsAcceptable: %+v, shard: %v, cmd: %+v]\n", kv.me, kv.shardsAcceptable, key2shard(cmd.Key), cmd)
+	// DPrintf("[Server.ProcessCommandHandler] [me: %v, cmd: %+v]\n", kv.me, cmd)
 	if _, ok := kv.shardsAcceptable[key2shard(cmd.Key)]; !ok {
 		kv.mu.Unlock()
-		return ErrWrongGroup, ""
+		err, value = ErrWrongGroup, ""
+		return err, value
 	}
 	if cmd.Op != "Get" && kv.IsDuplicate(cmd) {
 		kv.mu.Unlock()
-		return OK, ""
+		err, value = OK, ""
+		return err, value
 	}
+	kv.mu.Unlock()
+	DPrintf("[Server.ProcessCommandHandler] [start cmd: %+v]\n", cmd)
+
 	index, term, isLeader := kv.rf.Start(cmd)
 	if !isLeader {
 		err, value = ErrWrongLeader, ""
 		DPrintf("[Server.ProcessCommandHandler] [me: %v isn't Leader]\n", kv.me)
-		kv.mu.Unlock()
 		return err, value
 	}
 	it := IndexAndTerm{
@@ -117,6 +125,7 @@ func (kv *ShardKV) ProcessCommandHandler(cmd Op) (Err, string) {
 		Term:  term,
 	}
 	ch := make(chan CommonReply, 1)
+	kv.mu.Lock()
 	kv.replyCh[it] = ch
 	DPrintf("[Server.ProcessCommandHandler] [cmd: %v, it: %v]\n", cmd, it)
 	kv.mu.Unlock()
@@ -157,24 +166,24 @@ func (kv *ShardKV) handleCommand(msg raft.ApplyMsg) {
 	switch msg.Command.(type) {
 	case ConfigUpdateCommand:
 		cmd := msg.Command.(ConfigUpdateCommand)
-		DPrintf("[ShardKV.ConfigUpdateCommand] [cmd : %+v]\n", cmd)
+		DPrintf("[ShardKV.ConfigUpdateCommand] [me: %v, cmd : %+v]\n", kv.me, cmd)
 		kv.updateConfig(cmd.Config)
 	case ShardReplicationCommand:
 		cmd := msg.Command.(ShardReplicationCommand)
-		DPrintf("[ShardKV.ShardReplicationCommand] [cmd : %+v]\n", cmd)
+		DPrintf("[ShardKV.ShardReplicationCommand] [me: %v, cmd : %+v]\n", kv.me, cmd)
 		kv.replicateShard(cmd)
 	case GcCommand:
 		cmd := msg.Command.(GcCommand)
-		DPrintf("[ShardKV.GcCommand] [cmd : %+v]\n", cmd)
+		DPrintf("[ShardKV.GcCommand] [me: %v, cmd : %+v]\n", kv.me, cmd)
 		if _, ok := kv.needSendShards[cmd.Num][cmd.Shard]; ok {
 			delete(kv.needSendShards[cmd.Num], cmd.Shard)
 		}
 		if replyCh, ok := kv.replyCh[IndexAndTerm{msg.CommandIndex, msg.CommandTerm}]; ok {
-			replyCh <- CommonReply{Err: OK}
+			replyCh <- CommonReply{Err: OK, Value: ""}
 		}
 	case GcSuccessCommand:
 		cmd := msg.Command.(GcSuccessCommand)
-		DPrintf("[ShardKV.GcSuccessCommand] [cmd : %+v]\n", cmd)
+		DPrintf("[ShardKV.GcSuccessCommand] [me: %+v, cmd : %+v]\n", kv.me, cmd)
 		if configNum, ok := kv.gcList[cmd.Shard]; ok && configNum == cmd.Num {
 			delete(kv.gcList, cmd.Shard)
 		}
@@ -183,6 +192,10 @@ func (kv *ShardKV) handleCommand(msg raft.ApplyMsg) {
 		reply := CommonReply{}
 		if _, ok := kv.shardsAcceptable[key2shard(op.Key)]; !ok {
 			reply = CommonReply{ErrWrongGroup, ""}
+			if replyCh, ok := kv.replyCh[IndexAndTerm{msg.CommandIndex, msg.CommandTerm}]; ok {
+				replyCh <- reply
+				DPrintf("[kv.handleCommand] [msg: %+v is applied]\n", msg)
+			}
 		} else {
 			if op.Op != Get && kv.IsDuplicate(op) {
 				reply = CommonReply{OK, ""}
@@ -202,18 +215,19 @@ func (kv *ShardKV) handleCommand(msg raft.ApplyMsg) {
 					reply = CommonReply{OK, ""}
 				}
 			}
+			if replyCh, ok := kv.replyCh[IndexAndTerm{msg.CommandIndex, msg.CommandTerm}]; ok {
+				replyCh <- reply
+				DPrintf("[kv.handleCommand] [msg: %+v is applied]\n", msg)
+			}
+			kv.cmd[op.ClientId] = op.CommandId
 		}
-		if replyCh, ok := kv.replyCh[IndexAndTerm{msg.CommandIndex, msg.CommandTerm}]; ok {
-			replyCh <- reply
-			DPrintf("[kv.handleCommand] [msg: %+v is applied]\n", msg)
-		}
-		kv.cmd[op.ClientId] = op.CommandId
-		kv.lastApplied = msg.CommandIndex
 	}
 
+	kv.lastApplied = msg.CommandIndex
 	if kv.needSnapshot() {
 		kv.createSnapshot(msg.CommandIndex)
 	}
+	DPrintf("[kv.handleCommand] [me: %v, needPullShards: %v]\n", kv.me, kv.needPullShards)
 }
 
 //
@@ -321,15 +335,18 @@ func (kv *ShardKV) getNextConfig(Num int) (shardctrler.Config, bool) {
 
 func (kv *ShardKV) ConfigureAction() {
 	kv.mu.Lock()
-	defer kv.mu.Unlock()
 	// 还有未拉取完的 shards
 	if len(kv.needPullShards) > 0 {
+		kv.mu.Unlock()
 		return
 	}
-	DPrintf("[ConfigureAction] [me: %+v, kv.needPullShards: %+v]\n", kv.me, kv.needPullShards)
+	// DPrintf("[ConfigureAction] [me: %+v, kv.config.Num: %+v]\n", kv.me, kv.config.Num)
 	if config, ok := kv.getNextConfig(kv.config.Num); ok {
+		kv.mu.Unlock()
 		kv.rf.Start(ConfigUpdateCommand{config})
 		DPrintf("[ConfigureAction] [ConfigUpdateCommand: %+v]\n", config)
+	} else {
+		kv.mu.Unlock()
 	}
 }
 
@@ -344,6 +361,7 @@ func (kv *ShardKV) MigrationAction() {
 		go func(config shardctrler.Config, shard int) {
 			defer wg.Done()
 			_, isLeader := kv.rf.GetState()
+			DPrintf("[MigrationAction] [me: %v, isLeader: %v]\n", kv.me, isLeader)
 			if !isLeader {
 				return
 			}
@@ -352,7 +370,7 @@ func (kv *ShardKV) MigrationAction() {
 			for _, server := range config.Groups[gId] {
 				reply := ShardPullReply{}
 				ok := kv.make_end(server).Call("ShardKV.ShardPull", &args, &reply) // 之前的 group 里拉取分片。
-				DPrintf("[MigrationAction] [me: %v, args: %+v, ShardPull Data: %+v]\n", kv.me, args, reply.Data)
+				DPrintf("[MigrationAction] [me: %v, server: %v, args: %+v, ShardPull Data: %+v]\n", kv.me, server, args, reply.Data)
 				if ok && reply.Err == OK {
 					kv.rf.Start(ShardReplicationCommand{Data: reply.Data, Cmd: reply.Cmd, Shard: shard, Num: config.Num})
 					break
@@ -367,7 +385,7 @@ func (kv *ShardKV) MigrationAction() {
 func (kv *ShardKV) GcAction() {
 	kv.mu.Lock()
 	wg := sync.WaitGroup{}
-	DPrintf("[GcAction] [me: %v, kv.gcList: %+v]\n", kv.me, kv.gcList)
+	// DPrintf("[GcAction] [me: %v, kv.gcList: %+v]\n", kv.me, kv.gcList)
 	for shard, configNum := range kv.gcList {
 		// DPrintf("[MigrationAction] [me: %v, shard: %v, configNum: %v]\n", kv.me, shard, configNum)
 		wg.Add(1)

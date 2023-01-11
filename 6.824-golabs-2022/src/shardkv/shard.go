@@ -11,6 +11,7 @@ ConfigureAction:
 拉取到新的配置，更新配置，并构造出需要发出的分片与需要拉取的分片。
 */
 func (kv *ShardKV) updateConfig(config shardctrler.Config) {
+	DPrintf("[ShardKV.updateConfig] [me: %v, config.Num: %v, kv.config.Num: %v]\n", kv.me, config.Num, kv.config.Num)
 	if config.Num <= kv.config.Num {
 		return
 	}
@@ -49,6 +50,8 @@ func (kv *ShardKV) updateConfig(config shardctrler.Config) {
 			}
 		}
 	}
+
+	DPrintf("[ShardKV.updateConfig] [me: %v, kv.gid: %+v, shardsAcceptable: %+v, kv.needPullShards: %+v, config: %+v]\n", kv.me, kv.gid, kv.shardsAcceptable, kv.needPullShards, config)
 }
 
 /*
@@ -76,16 +79,20 @@ func (kv *ShardKV) ShardGc(args *ShardGcArgs, reply *ShardGcReply) {
 	_, isLeader := kv.rf.GetState()
 	if !isLeader {
 		reply.Err = ErrWrongLeader
+		kv.mu.Unlock()
 		return
 	}
 	if _, ok := kv.needSendShards[args.Num][args.Shard]; !ok {
 		reply.Err = OK
+		kv.mu.Unlock()
 		return
 	}
+	kv.mu.Unlock()
 	cmd := GcCommand{Shard: args.Shard, Num: args.Num}
 	index, term, isLeader := kv.rf.Start(cmd)
 	ch := make(chan CommonReply, 1)
 	it := IndexAndTerm{Index: index, Term: term}
+	kv.mu.Lock()
 	kv.replyCh[it] = ch
 	kv.mu.Unlock()
 	select {
@@ -98,11 +105,17 @@ func (kv *ShardKV) ShardGc(args *ShardGcArgs, reply *ShardGcReply) {
 }
 
 func (kv *ShardKV) replicateShard(cmd ShardReplicationCommand) {
+	/*
+		if cmd.Num != kv.config.Num-1 {
+			return
+		}
+	*/
 	if _, ok := kv.needPullShards[cmd.Shard]; !ok {
 		return
 	}
 	// 删除需要拉取的 shard
 	delete(kv.needPullShards, cmd.Shard)
+	DPrintf("[ShardKV.replicateShard] [me: %v, kv.needPullShards: %+v, cmd.Shard: %+v]\n", kv.me, kv.needPullShards, cmd.Shard)
 	if _, ok := kv.shardsAcceptable[cmd.Shard]; !ok {
 		for k, v := range cmd.Data {
 			kv.data[k] = v

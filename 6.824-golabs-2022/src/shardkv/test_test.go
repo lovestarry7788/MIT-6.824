@@ -166,6 +166,7 @@ func TestSnapshot(t *testing.T) {
 		ck.Put(ka[i], va[i])
 	}
 	for i := 0; i < n; i++ {
+		// fmt.Printf("i: %v\n", i)
 		check(t, ck, ka[i], va[i])
 	}
 
@@ -174,6 +175,7 @@ func TestSnapshot(t *testing.T) {
 	cfg.leave(0)
 
 	for i := 0; i < n; i++ {
+		// fmt.Printf("i: %v\n", i)
 		check(t, ck, ka[i], va[i])
 		x := randstring(20)
 		ck.Append(ka[i], x)

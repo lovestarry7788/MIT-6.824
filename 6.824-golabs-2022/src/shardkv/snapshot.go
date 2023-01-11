@@ -40,6 +40,7 @@ func (kv *ShardKV) readSnapshot(data []byte) {
 	d.Decode(&kv.needPullShards)
 	d.Decode(&kv.needSendShards)
 	d.Decode(&kv.gcList)
+	DPrintf("[readSnapshot] [me: %v, kv.shardsAcceptable: %+v, kv.config: %v]\n", kv.me, kv.shardsAcceptable, kv.config)
 }
 
 func (kv *ShardKV) handleSnapshot(msg raft.ApplyMsg) {
